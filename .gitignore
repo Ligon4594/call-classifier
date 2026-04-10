@@ -18,5 +18,6 @@ dialpad_raw_operator_response.json
 servicetitan_raw_response.json
 pipeline_test_results.json
 
-# Local test scripts (source .env secrets)
+# Local test scripts and push helpers (contain secrets)
 test_*.command
+push_*.command

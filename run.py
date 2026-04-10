@@ -85,9 +85,11 @@ def main():
     )
 
     # Generate report
+    # NOTE: Using Resend sandbox (onboarding@resend.dev) which can only send
+    # to the account owner's email. Once crhvacpro.com is verified in Resend,
+    # add Julie back: "julietemplin@crhvacpro.com"
     recipients = [
         os.environ.get("REPORT_RECIPIENT", "tligon@crhvacpro.com"),
-        "julietemplin@crhvacpro.com",
     ]
 
     text_report = render_text_report(
