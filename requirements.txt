@@ -1,0 +1,4 @@
+# C&R Call Classifier — Python dependencies
+# Only two external packages. Everything else uses Python stdlib.
+anthropic>=0.40.0       # Claude API SDK (classification engine)
+python-dotenv>=1.0.0    # .env file loading (local dev only; Railway injects env vars)

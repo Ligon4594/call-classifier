@@ -1,0 +1,22 @@
+.env
+.env.local
+*.pyc
+__pycache__/
+.venv/
+venv/
+.pytest_cache/
+.mypy_cache/
+.ruff_cache/
+.DS_Store
+*.egg-info/
+build/
+dist/
+
+# Test artifacts (raw API dumps from live tests)
+dialpad_raw_response.json
+dialpad_raw_operator_response.json
+servicetitan_raw_response.json
+pipeline_test_results.json
+
+# Local test scripts (source .env secrets)
+test_*.command

@@ -1,0 +1,43 @@
+{
+  "_comment": "Real call captured manually from the Dialpad UI on 2026-04-09. ServiceTitan flagged this call as 'Abandoned' but the Dialpad transcript shows a successful 3-minute conversation where the customer (Gita Ranum) scheduled a maintenance appointment with Julie Templin. This call SHOULD have been booked as an HVAC Maintenance job in ServiceTitan but wasn't. Used as a regression-test fixture to make sure the classifier (a) picks Maintenance / HVAC Maintenance and (b) flags should_have_been_booked=true.",
+  "servicetitan": {
+    "call_id": "58352301",
+    "caller_phone": "(903) 245-1470",
+    "direction": "Inbound",
+    "received_at": "2026-04-03T12:23:13",
+    "duration_seconds": 201,
+    "call_type": "Abandoned",
+    "customer_name": "Geetha Ramarathnam",
+    "recording_url": null
+  },
+  "dialpad": {
+    "call_id": "5177714974531584",
+    "external_number": "(903) 245-1470",
+    "internal_user": "Julie Templin",
+    "started_at": "2026-04-03T12:23:13",
+    "duration_seconds": 202,
+    "connected_seconds": 193,
+    "transcript": "[Transcript text was visible in the Dialpad UI but not fully captured during manual testing — populate this field with the real transcript text once Dialpad API access is wired up. The Recap below is sufficient to test the classifier in dry-run mode.]",
+    "recap": "Gita Ranum contacts Julie to schedule a maintenance check for their heating and air conditioning system. They agree on an afternoon slot for Thursday. Julie explains the contract options, which include either monthly or annual payments, and details the benefits such as spring and fall maintenance visits and a discount on parts. Gita is also informed that filters are included in the service, so they don't need to worry about purchasing them. Julie promises to confirm the appointment details later in the afternoon.",
+    "action_items": [
+      "Julie to confirm appointment details and send a reminder to Gita.",
+      "Gita to prepare for maintenance visit on Thursday.",
+      "Julie to schedule maintenance visit for Thursday afternoon."
+    ],
+    "moments": {
+      "Action Item": 1,
+      "Currency": 2,
+      "Call Purpose": 1,
+      "Interesting Question": 1,
+      "Time": 2
+    }
+  },
+  "expected_classification": {
+    "_comment": "What we expect the classifier to return for this call. Used by tests/test_classifier.py once the API is wired up.",
+    "classification_type": "job_type",
+    "classification_value": "HVAC Maintenance",
+    "should_have_been_booked": true,
+    "booking_recommendation": "HVAC Maintenance",
+    "reasoning_should_mention": ["maintenance", "Thursday", "scheduled", "appointment"]
+  }
+}
