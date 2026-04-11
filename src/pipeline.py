@@ -23,7 +23,7 @@ from typing import Iterable, Optional
 from .classifier import Classifier
 from .dialpad import DialpadClient
 from .linker import link_batch
-from .models import Classification, LinkedCall, ServiceTitanCall
+from .models import Classification, JobTypeMismatch, LinkedCall, ServiceTitanCall
 from .servicetitan import ServiceTitanClient
 
 
@@ -253,6 +253,46 @@ def run_pipeline(
     else:
         log("Step 5: Write-back disabled (dry run). No changes made to ServiceTitan.")
 
+    # ---- Step 6: Audit Job Types on Booked calls ----
+    # For every booked call the classifier assigned a job_type to, compare the
+    # prediction against the job type already on the ST booking.  Mismatches at
+    # ≥70% confidence are flagged for Taylor to review in the weekly report.
+    log("Step 6: Auditing job type accuracy on booked calls...")
+    st_call_map = {lc.servicetitan.call_id: lc.servicetitan for lc in linked}
+    mismatches: list[JobTypeMismatch] = []
+    for result in classifications:
+        if result.classification_type != "job_type":
+            continue
+        if result.confidence < 0.7:
+            continue
+        st_call = st_call_map.get(result.call_id)
+        if not st_call or not st_call.job_id:
+            continue  # Unbooked calls are handled by the missed-booking logic above
+        actual_raw = st_call.job_type_name or ""
+        if not actual_raw or actual_raw == "Imported Default JobType":
+            continue
+        actual_norm = _normalize_job_type(actual_raw)
+        predicted_norm = _normalize_job_type(result.classification_value)
+        if actual_norm == predicted_norm:
+            continue  # Match — all good
+        mismatches.append(JobTypeMismatch(
+            call_id=result.call_id,
+            job_number=st_call.job_number,
+            caller_phone=st_call.caller_phone,
+            customer_name=st_call.customer_name,
+            received_at=st_call.received_at,
+            actual_job_type=actual_raw,
+            predicted_job_type=result.classification_value,
+            confidence=result.confidence,
+            reasoning=result.reasoning,
+        ))
+
+    stats["job_type_mismatches"] = mismatches
+    if mismatches:
+        log(f"  Found {len(mismatches)} job type mismatch(es) to review.")
+    else:
+        log("  No job type mismatches found.")
+
     # ---- Done ----
     summary = summarize(classifications)
     log(f"\nDone! {summary['total']} calls processed.")
@@ -286,6 +326,22 @@ def summarize(classifications: Iterable[Classification]) -> dict:
         "missed_bookings": missed,
         "low_confidence": low_conf,
     }
+
+
+def _normalize_job_type(name: str) -> str:
+    """Normalize a job type name for comparison.
+
+    Strips case, whitespace, hyphens, and common prefixes so that small
+    formatting differences between the classifier's vocabulary and ServiceTitan's
+    stored job type names don't produce false positives.
+
+    Examples:
+      "HVAC No Cool"  → "hvacnocool"
+      "HVAC - No Cool" → "hvacnocool"
+      "No Cool"        → "nocool"   (different from above — intentional flag)
+    """
+    import re
+    return re.sub(r"[\s\-/]", "", name.lower()).strip()
 
 
 def _normalize_reason_name(name: str) -> str:

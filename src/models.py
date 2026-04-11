@@ -75,3 +75,22 @@ class Classification:
     classified_at: datetime
     classifier_version: str                   # e.g. "v1.0-claude-haiku-4.5"
     raw_llm_response: Optional[str] = None    # Full response for debugging
+
+
+@dataclass
+class JobTypeMismatch:
+    """A booked call where the classifier disagrees with the assigned Job Type.
+
+    Collected during each pipeline run and included in the weekly report so
+    Taylor can spot-check and correct wrong job types in ServiceTitan.
+    """
+
+    call_id: str                  # ServiceTitan lead call ID
+    job_number: Optional[str]     # ST job number — easy to look up in ST
+    caller_phone: str             # Customer phone number
+    customer_name: Optional[str]  # Customer name from ST (if known)
+    received_at: datetime         # When the call came in
+    actual_job_type: str          # Job type currently set on the ST booking
+    predicted_job_type: str       # What the classifier thinks it should be
+    confidence: float             # Classifier confidence (only flagged at ≥ 0.7)
+    reasoning: str                # Classifier's explanation

@@ -92,6 +92,8 @@ def main():
         os.environ.get("REPORT_RECIPIENT", "tligon@crhvacpro.com"),
     ]
 
+    mismatches = pipeline_stats.get("job_type_mismatches", [])
+
     text_report = render_text_report(
         start_date=start_date,
         end_date=end_date,
@@ -100,6 +102,7 @@ def main():
         matched_dialpad=pipeline_stats.get("matched_dialpad", 0),
         written_back=pipeline_stats.get("written_back", 0),
         reason_field_updated=pipeline_stats.get("reason_field_updated", 0),
+        job_type_mismatches=mismatches,
     )
 
     # Always print the text report to stdout
@@ -115,6 +118,7 @@ def main():
             matched_dialpad=pipeline_stats.get("matched_dialpad", 0),
             written_back=pipeline_stats.get("written_back", 0),
             reason_field_updated=pipeline_stats.get("reason_field_updated", 0),
+            job_type_mismatches=mismatches,
         )
         try:
             send_report(

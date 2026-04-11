@@ -26,7 +26,7 @@ from typing import Iterable, Optional
 from urllib.request import Request, urlopen
 from urllib.error import HTTPError
 
-from .models import Classification
+from .models import Classification, JobTypeMismatch
 
 
 def render_text_report(
@@ -38,6 +38,7 @@ def render_text_report(
     matched_dialpad: int = 0,
     written_back: int = 0,
     reason_field_updated: int = 0,
+    job_type_mismatches: Optional[list[JobTypeMismatch]] = None,
 ) -> str:
     """Plain-text version of the weekly report."""
     classifications = list(classifications)
@@ -121,6 +122,31 @@ def render_text_report(
     else:
         lines.append("  None! All classifications are above the confidence threshold.")
 
+    mismatches = job_type_mismatches or []
+    lines.extend([
+        "",
+        "-" * 60,
+        f"JOB TYPE MISMATCHES TO REVIEW: {len(mismatches)}",
+        "-" * 60,
+    ])
+    if mismatches:
+        lines.append("The AI disagrees with the Job Type on these booked calls.")
+        lines.append("Check each one in ServiceTitan and update if needed.")
+        lines.append("")
+        for m in mismatches[:30]:
+            job_label = f"Job #{m.job_number}" if m.job_number else f"Call {m.call_id}"
+            customer = m.customer_name or m.caller_phone
+            date_str = m.received_at.strftime("%m/%d/%Y %I:%M %p") if m.received_at else ""
+            lines.append(f"  {job_label} — {customer} — {date_str}")
+            lines.append(f"    ST Job Type : {m.actual_job_type}")
+            lines.append(f"    AI predicts : {m.predicted_job_type} ({m.confidence:.0%} confidence)")
+            lines.append(f"    Reasoning   : {m.reasoning}")
+            lines.append("")
+        if len(mismatches) > 30:
+            lines.append(f"  ... and {len(mismatches) - 30} more.")
+    else:
+        lines.append("  None! All booked calls match the expected job type.")
+
     lines.extend([
         "",
         "=" * 60,
@@ -139,6 +165,7 @@ def render_html_report(
     matched_dialpad: int = 0,
     written_back: int = 0,
     reason_field_updated: int = 0,
+    job_type_mismatches: Optional[list[JobTypeMismatch]] = None,
 ) -> str:
     """HTML version for prettier email rendering."""
     text = render_text_report(
@@ -149,6 +176,7 @@ def render_html_report(
         matched_dialpad=matched_dialpad,
         written_back=written_back,
         reason_field_updated=reason_field_updated,
+        job_type_mismatches=job_type_mismatches,
     )
     # Simple HTML wrapper — keeps it readable in all email clients.
     escaped = (
