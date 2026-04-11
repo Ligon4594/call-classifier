@@ -156,48 +156,82 @@ def run_pipeline(
         except Exception as e:
             log(f"  Warning: couldn't load call reasons from ServiceTitan — will use memo only. ({e})")
 
-        # Build a call_id → call_type map so we can skip Booked calls safely.
+        # Build lookup maps for write-back decisions.
         call_type_map: dict[str, str] = {
             lc.servicetitan.call_id: (lc.servicetitan.call_type or "")
+            for lc in linked
+        }
+        # job_id is None for unbooked calls — used to detect missed service calls.
+        call_job_map: dict[str, Optional[int]] = {
+            lc.servicetitan.call_id: lc.servicetitan.job_id
             for lc in linked
         }
 
         written = 0
         skipped_no_id = 0
         for result in classifications:
-            if result.confidence < 0.7:
-                continue  # Skip low-confidence — let a human review these.
-
-            # Only write back call_reason classifications. Job type
-            # classifications map to the job record, not the call record.
-            if result.classification_type != "call_reason":
-                continue
-
-            # Don't touch calls that are already Booked — a job exists and
-            # changing callType to Excused would be wrong.
             current_call_type = call_type_map.get(result.call_id, "")
+
+            # Never touch already-Booked calls — a job exists and changing
+            # callType to Excused would corrupt the booking record.
             if current_call_type == "Booked":
-                log(f"  [skip] call {result.call_id}: callType=Booked, skipping reason write-back")
                 continue
 
-            norm = _normalize_reason_name(result.classification_value)
-            call_reason_id: Optional[int] = reason_name_to_id.get(norm)
+            if result.classification_type == "call_reason":
+                # Threshold: 0.5 (lower than job_type writes) because call_reason
+                # calls are never booked so the risk of a wrong write is low.
+                # This catches edge cases — Avoca calls, short abandoned calls —
+                # that have less context and legitimately score 0.5–0.69.
+                if result.confidence < 0.5:
+                    continue
 
-            if call_reason_id is None:
-                log(f"  [skip] call {result.call_id}: '{result.classification_value}' has no matching ST reason ID")
-                skipped_no_id += 1
-                continue
+                norm = _normalize_reason_name(result.classification_value)
+                call_reason_id: Optional[int] = reason_name_to_id.get(norm)
 
-            try:
-                st_client.write_classification(
-                    call_id=result.call_id,
-                    call_reason_id=call_reason_id,
-                    call_reason_name=result.classification_value,  # REQUIRED: ST ignores reason without name
-                )
-                written += 1
-                log(f"  [ok] call {result.call_id}: set Call Reason → '{result.classification_value}' (id={call_reason_id})")
-            except Exception as e:
-                log(f"  [error] call {result.call_id}: {e}")
+                if call_reason_id is None:
+                    log(f"  [skip] call {result.call_id}: '{result.classification_value}' has no matching ST reason ID")
+                    skipped_no_id += 1
+                    continue
+
+                try:
+                    st_client.write_classification(
+                        call_id=result.call_id,
+                        call_reason_id=call_reason_id,
+                        call_reason_name=result.classification_value,
+                    )
+                    written += 1
+                    log(f"  [ok] call {result.call_id}: set Call Reason → '{result.classification_value}' (id={call_reason_id})")
+                except Exception as e:
+                    log(f"  [error] call {result.call_id}: {e}")
+
+            elif result.classification_type == "job_type":
+                # If the AI sees an HVAC service call but no booking exists in ST,
+                # that's a missed service opportunity. We can't write a job type
+                # to the call record directly, so we stamp "Missed Call" as the
+                # call reason — it shows up in reports and prompts follow-up.
+                if result.confidence < 0.5:
+                    continue
+
+                job_id = call_job_map.get(result.call_id)
+                if job_id is not None:
+                    continue  # Has a booking — job type is already on the job record.
+
+                # Unbooked job_type = missed service call. Write "Missed Call" reason.
+                missed_call_id = reason_name_to_id.get(_normalize_reason_name("Missed Call"))
+                if not missed_call_id:
+                    log(f"  [skip] call {result.call_id}: 'Missed Call' reason not in ST reason map")
+                    continue
+
+                try:
+                    st_client.write_classification(
+                        call_id=result.call_id,
+                        call_reason_id=missed_call_id,
+                        call_reason_name="Missed Call",
+                    )
+                    written += 1
+                    log(f"  [ok] call {result.call_id}: unbooked {result.classification_value} → set 'Missed Call' (potential missed booking)")
+                except Exception as e:
+                    log(f"  [error] call {result.call_id}: {e}")
 
         stats["written_back"] = written
         stats["reason_field_updated"] = written  # Every successful write updates the reason field
