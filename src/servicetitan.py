@@ -271,28 +271,33 @@ class ServiceTitanClient:
         *,
         call_id: str,
         call_reason_id: Optional[int] = None,
-        memo: Optional[str] = None,
+        call_reason_name: Optional[str] = None,
     ) -> dict:
         """Write the Call Reason back to a ServiceTitan call record.
 
-        Diagnostic testing confirmed:
-          PUT /telecom/v2/tenant/{tid}/calls/{callId}  → HTTP 200 ✅
-          PATCH /telecom/v2/tenant/{tid}/calls/{callId} → HTTP 404 ❌
-          PATCH /jbp/v2/tenant/{tid}/calls/{callId}    → HTTP 404 ❌
+        PUT /telecom/v2/tenant/{tid}/calls/{callId}
+        Body: {"callType": "Excused", "reason": {"id": X, "name": "Y"}}
 
-        ServiceTitan uses PUT (not PATCH) for call updates on the Telecom API.
-        The body accepts partial updates — only send the fields you want changed.
+        Critical findings from exhaustive diagnostic testing:
+          - The `reason` object MUST include BOTH "id" AND "name" or it silently
+            does nothing (returns 200 but never saves). Just {"id": X} → ignored.
+          - For Abandoned/Unbooked calls, callType must also be set to "Excused"
+            in the same request or the reason field won't save.
+          - PATCH returns 404. PUT with nested reason+name is the correct format.
 
-        If call_reason_id is None, there's nothing to write (no matching ST
-        reason ID found), so we skip silently.
+        If call_reason_id or call_reason_name are missing, we skip the write
+        — both are required.
         """
-        if call_reason_id is None:
+        if not call_reason_id or not call_reason_name:
             import sys
-            print(f"    [skip] call {call_id}: no matching call reason ID, skipping write-back", file=sys.stderr)
+            print(f"    [skip] call {call_id}: need both reason id and name", file=sys.stderr)
             return {}
 
         path = f"/telecom/v2/tenant/{self.tenant_id}/calls/{call_id}"
-        body: dict[str, Any] = {"reasonId": call_reason_id}
+        body: dict[str, Any] = {
+            "callType": "Excused",
+            "reason": {"id": call_reason_id, "name": call_reason_name},
+        }
 
         return self._put(path, json_body=body)
 

@@ -156,16 +156,28 @@ def run_pipeline(
         except Exception as e:
             log(f"  Warning: couldn't load call reasons from ServiceTitan — will use memo only. ({e})")
 
+        # Build a call_id → call_type map so we can skip Booked calls safely.
+        call_type_map: dict[str, str] = {
+            lc.servicetitan.call_id: (lc.servicetitan.call_type or "")
+            for lc in linked
+        }
+
         written = 0
         skipped_no_id = 0
         for result in classifications:
             if result.confidence < 0.7:
                 continue  # Skip low-confidence — let a human review these.
 
-            # Only write back call_reason classifications that have a matching
-            # ServiceTitan reason ID. Job type classifications map to the job
-            # record, not the call record — skip those here.
+            # Only write back call_reason classifications. Job type
+            # classifications map to the job record, not the call record.
             if result.classification_type != "call_reason":
+                continue
+
+            # Don't touch calls that are already Booked — a job exists and
+            # changing callType to Excused would be wrong.
+            current_call_type = call_type_map.get(result.call_id, "")
+            if current_call_type == "Booked":
+                log(f"  [skip] call {result.call_id}: callType=Booked, skipping reason write-back")
                 continue
 
             norm = _normalize_reason_name(result.classification_value)
@@ -180,6 +192,7 @@ def run_pipeline(
                 st_client.write_classification(
                     call_id=result.call_id,
                     call_reason_id=call_reason_id,
+                    call_reason_name=result.classification_value,  # REQUIRED: ST ignores reason without name
                 )
                 written += 1
                 log(f"  [ok] call {result.call_id}: set Call Reason → '{result.classification_value}' (id={call_reason_id})")
