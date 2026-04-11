@@ -275,37 +275,71 @@ class ServiceTitanClient:
     ) -> dict:
         """Write the Call Reason back to a ServiceTitan call record.
 
-        Uses the Job Booking API (jbp) which owns Call Reasons. The Telecom
-        API is read-only for existing calls — PATCH to /telecom/... returns 404.
+        Diagnostic testing confirmed:
+          PUT /telecom/v2/tenant/{tid}/calls/{callId}  → HTTP 200 ✅
+          PATCH /telecom/v2/tenant/{tid}/calls/{callId} → HTTP 404 ❌
+          PATCH /jbp/v2/tenant/{tid}/calls/{callId}    → HTTP 404 ❌
 
-        The jbp endpoint accepts:
-          PATCH /jbp/v2/tenant/{tid}/calls/{callId}
-          Body: {"callReasonId": <int>}
+        ServiceTitan uses PUT (not PATCH) for call updates on the Telecom API.
+        The body accepts partial updates — only send the fields you want changed.
 
-        If call_reason_id is None (no matching ST reason), we skip the write
-        and log it — we don't have a way to write free-text memos via this API.
+        If call_reason_id is None, there's nothing to write (no matching ST
+        reason ID found), so we skip silently.
         """
         if call_reason_id is None:
-            # Nothing to write without a reason ID
             import sys
             print(f"    [skip] call {call_id}: no matching call reason ID, skipping write-back", file=sys.stderr)
             return {}
 
-        path = f"/jbp/v2/tenant/{self.tenant_id}/calls/{call_id}"
-        body: dict[str, Any] = {"callReasonId": call_reason_id}
+        path = f"/telecom/v2/tenant/{self.tenant_id}/calls/{call_id}"
+        body: dict[str, Any] = {"reasonId": call_reason_id}
 
-        return self._patch(path, json_body=body)
+        return self._put(path, json_body=body)
 
     def get_call_reasons(self) -> list[dict]:
-        """Fetch available call reasons configured in ServiceTitan.
+        """Return a list of {"id": <int>, "name": <str>} reason dicts.
 
-        Call Reasons live in the Job Booking API (jbp), NOT Telecom.
-        This requires the "Call Reasons" Read scope under Job Booking in the
-        ServiceTitan Developer Portal.
+        ServiceTitan has no working GET /call-reasons list endpoint accessible
+        via standard API scopes. Diagnostic testing confirmed every candidate
+        path returns 404.
+
+        Instead we extract reason IDs from recent call records — any call that
+        already has a reason set tells us {"id": X, "name": "Y"}. We pull two
+        pages (400 calls) to maximise coverage of distinct reasons in use.
+
+        This approach means we can only map to reasons that appear in recent
+        call history. In practice that covers all active call reasons since
+        ServiceTitan reports populated them for existing calls.
         """
-        path = f"/jbp/v2/tenant/{self.tenant_id}/call-reasons"
-        data = self._get(path, params={"page": 1, "pageSize": 200, "active": True})
-        return data.get("data") or (data if isinstance(data, list) else [])
+        from datetime import date, timedelta
+
+        seen: dict[int, str] = {}  # id → name, deduped
+
+        # Pull last ~60 days in 2-page batches to capture all active reasons.
+        today = date.today()
+        start = today - timedelta(days=60)
+
+        for page in range(1, 3):
+            try:
+                path = f"/telecom/v2/tenant/{self.tenant_id}/calls"
+                data = self._get(path, params={
+                    "page": page,
+                    "pageSize": 200,
+                    "createdOnOrAfter": start.isoformat(),
+                    "createdBefore": today.isoformat(),
+                })
+                items = data.get("data") or []
+                for item in items:
+                    call = item.get("leadCall") or {}
+                    reason = call.get("reason") or {}
+                    if isinstance(reason, dict) and reason.get("id") and reason.get("name"):
+                        seen[reason["id"]] = reason["name"]
+                if not data.get("hasMore"):
+                    break
+            except Exception:
+                break
+
+        return [{"id": rid, "name": rname} for rid, rname in seen.items()]
 
     def get_customer(self, customer_id: str) -> dict:
         """Fetch customer details for context enrichment."""
