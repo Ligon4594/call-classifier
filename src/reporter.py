@@ -80,7 +80,7 @@ def render_text_report(
         "-" * 60,
         "CLASSIFICATION DISTRIBUTION",
         "-" * 60,
-    ]
+    ])
     for value, count in sorted(by_value.items(), key=lambda kv: -kv[1]):
         pct = (count / total * 100) if total else 0
         lines.append(f"  {count:>4}  ({pct:4.1f}%)  {value}")

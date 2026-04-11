@@ -273,35 +273,38 @@ class ServiceTitanClient:
         call_reason_id: Optional[int] = None,
         memo: Optional[str] = None,
     ) -> dict:
-        """Write the classification back to the ServiceTitan call record.
+        """Write the Call Reason back to a ServiceTitan call record.
 
-        Two strategies (we'll use whichever works against the live API):
-          1. Update the call's `reason` field (requires a call_reason_id lookup)
-          2. Add a note/memo to the call record with the classification details
+        Uses the Job Booking API (jbp) which owns Call Reasons. The Telecom
+        API is read-only for existing calls — PATCH to /telecom/... returns 404.
 
-        For now this sends a PATCH to the call endpoint. If the API uses PUT
-        instead, we'll switch on first live test.
+        The jbp endpoint accepts:
+          PATCH /jbp/v2/tenant/{tid}/calls/{callId}
+          Body: {"callReasonId": <int>}
+
+        If call_reason_id is None (no matching ST reason), we skip the write
+        and log it — we don't have a way to write free-text memos via this API.
         """
-        path = f"/telecom/v2/tenant/{self.tenant_id}/calls/{call_id}"
-        body: dict[str, Any] = {}
-        if call_reason_id is not None:
-            body["reasonId"] = call_reason_id
-        if memo is not None:
-            body["memo"] = memo
+        if call_reason_id is None:
+            # Nothing to write without a reason ID
+            import sys
+            print(f"    [skip] call {call_id}: no matching call reason ID, skipping write-back", file=sys.stderr)
+            return {}
 
-        if not body:
-            raise ValueError("write_classification requires at least call_reason_id or memo")
+        path = f"/jbp/v2/tenant/{self.tenant_id}/calls/{call_id}"
+        body: dict[str, Any] = {"callReasonId": call_reason_id}
 
         return self._patch(path, json_body=body)
 
     def get_call_reasons(self) -> list[dict]:
-        """Fetch available call reasons/types configured in ServiceTitan.
+        """Fetch available call reasons configured in ServiceTitan.
 
-        This lets us map our classification_value (e.g. "HVAC Maintenance")
-        to the correct ServiceTitan reason ID for the write-back.
+        Call Reasons live in the Job Booking API (jbp), NOT Telecom.
+        This requires the "Call Reasons" Read scope under Job Booking in the
+        ServiceTitan Developer Portal.
         """
-        path = f"/telecom/v2/tenant/{self.tenant_id}/calls/reasons"
-        data = self._get(path)
+        path = f"/jbp/v2/tenant/{self.tenant_id}/call-reasons"
+        data = self._get(path, params={"page": 1, "pageSize": 200, "active": True})
         return data.get("data") or (data if isinstance(data, list) else [])
 
     def get_customer(self, customer_id: str) -> dict:

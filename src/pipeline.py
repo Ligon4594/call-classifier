@@ -86,7 +86,7 @@ def run_pipeline(
 
     if not st_calls:
         log("  No calls to process. Done.")
-        return []
+        return [], stats
 
     # ---- Step 2: Pull Dialpad calls in the same window (for batch linking) ----
     log("Step 2: Pulling Dialpad calls for linking...")
@@ -157,40 +157,40 @@ def run_pipeline(
             log(f"  Warning: couldn't load call reasons from ServiceTitan — will use memo only. ({e})")
 
         written = 0
-        reason_field_updated = 0
+        skipped_no_id = 0
         for result in classifications:
             if result.confidence < 0.7:
                 continue  # Skip low-confidence — let a human review these.
-            try:
-                # For call_reason classifications, try to look up the ServiceTitan
-                # reason ID so we update the actual Call Reason field, not just
-                # the memo. Job type classifications only get the memo since the
-                # job record already carries the type.
-                call_reason_id: Optional[int] = None
-                if result.classification_type == "call_reason":
-                    norm = _normalize_reason_name(result.classification_value)
-                    call_reason_id = reason_name_to_id.get(norm)
 
+            # Only write back call_reason classifications that have a matching
+            # ServiceTitan reason ID. Job type classifications map to the job
+            # record, not the call record — skip those here.
+            if result.classification_type != "call_reason":
+                continue
+
+            norm = _normalize_reason_name(result.classification_value)
+            call_reason_id: Optional[int] = reason_name_to_id.get(norm)
+
+            if call_reason_id is None:
+                log(f"  [skip] call {result.call_id}: '{result.classification_value}' has no matching ST reason ID")
+                skipped_no_id += 1
+                continue
+
+            try:
                 st_client.write_classification(
                     call_id=result.call_id,
                     call_reason_id=call_reason_id,
-                    memo=(
-                        f"[Auto-classified] {result.classification_type}: "
-                        f"{result.classification_value} (confidence: {result.confidence:.2f}). "
-                        f"{result.reasoning}"
-                    ),
                 )
                 written += 1
-                if call_reason_id is not None:
-                    reason_field_updated += 1
+                log(f"  [ok] call {result.call_id}: set Call Reason → '{result.classification_value}' (id={call_reason_id})")
             except Exception as e:
-                log(f"  Error writing back call {result.call_id}: {e}")
+                log(f"  [error] call {result.call_id}: {e}")
 
         stats["written_back"] = written
-        stats["reason_field_updated"] = reason_field_updated
-        log(f"  Wrote {written} classifications back to ServiceTitan.")
-        log(f"    - Call Reason field updated: {reason_field_updated}")
-        log(f"    - Memo-only (no ST reason ID match): {written - reason_field_updated}")
+        stats["reason_field_updated"] = written  # Every successful write updates the reason field
+        log(f"  Wrote {written} Call Reason fields back to ServiceTitan.")
+        if skipped_no_id:
+            log(f"  Skipped {skipped_no_id} calls with no matching ST reason ID (check your Call Reasons in ST match the rulebook).")
     else:
         log("Step 5: Write-back disabled (dry run). No changes made to ServiceTitan.")
 
