@@ -73,6 +73,18 @@ def run_pipeline(
     stats["total_st_calls"] = len(st_calls)
     log(f"  Got {len(st_calls)} calls from ServiceTitan.")
 
+    # Filter out Avoca-handled calls — Avoca transcripts are not accessible via
+    # Dialpad, so the classifier has no content to work with. Leave these calls
+    # unclassified in ServiceTitan until Avoca API access is available.
+    avoca_before = len(st_calls)
+    st_calls = [
+        c for c in st_calls
+        if (c.agent_name or "").strip().lower() != "avoca"
+    ]
+    avoca_skipped = avoca_before - len(st_calls)
+    if avoca_skipped:
+        log(f"  Skipped {avoca_skipped} Avoca-handled call(s) (no transcript access).")
+
     # Optionally filter out calls that already have a classification.
     if skip_already_classified:
         before = len(st_calls)
