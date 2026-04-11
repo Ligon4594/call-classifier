@@ -36,6 +36,8 @@ def render_text_report(
     classifications: Iterable[Classification],
     total_st_calls: int = 0,
     matched_dialpad: int = 0,
+    written_back: int = 0,
+    reason_field_updated: int = 0,
 ) -> str:
     """Plain-text version of the weekly report."""
     classifications = list(classifications)
@@ -63,6 +65,17 @@ def render_text_report(
         f"Classified by AI: {total}",
         f"  - Assigned a Call Reason: {by_type.get('call_reason', 0)}",
         f"  - Assigned a Job Type: {by_type.get('job_type', 0)}",
+    ]
+
+    if written_back > 0:
+        lines.extend([
+            "",
+            f"ServiceTitan Updates: {written_back} calls written back",
+            f"  - Call Reason field updated: {reason_field_updated}",
+            f"  - Memo-only (no ST reason match): {written_back - reason_field_updated}",
+        ])
+
+    lines.extend([
         "",
         "-" * 60,
         "CLASSIFICATION DISTRIBUTION",
@@ -124,6 +137,8 @@ def render_html_report(
     classifications: Iterable[Classification],
     total_st_calls: int = 0,
     matched_dialpad: int = 0,
+    written_back: int = 0,
+    reason_field_updated: int = 0,
 ) -> str:
     """HTML version for prettier email rendering."""
     text = render_text_report(
@@ -132,6 +147,8 @@ def render_html_report(
         classifications=classifications,
         total_st_calls=total_st_calls,
         matched_dialpad=matched_dialpad,
+        written_back=written_back,
+        reason_field_updated=reason_field_updated,
     )
     # Simple HTML wrapper — keeps it readable in all email clients.
     escaped = (

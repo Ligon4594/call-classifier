@@ -73,7 +73,7 @@ def main():
     classifier = Classifier(mode="dry_run" if args.dry_run else "live")
 
     # Run the pipeline
-    classifications = run_pipeline(
+    classifications, pipeline_stats = run_pipeline(
         start_date=start_date,
         end_date=end_date,
         st_client=st_client,
@@ -96,6 +96,10 @@ def main():
         start_date=start_date,
         end_date=end_date,
         classifications=classifications,
+        total_st_calls=pipeline_stats.get("total_st_calls", 0),
+        matched_dialpad=pipeline_stats.get("matched_dialpad", 0),
+        written_back=pipeline_stats.get("written_back", 0),
+        reason_field_updated=pipeline_stats.get("reason_field_updated", 0),
     )
 
     # Always print the text report to stdout
@@ -107,6 +111,10 @@ def main():
             start_date=start_date,
             end_date=end_date,
             classifications=classifications,
+            total_st_calls=pipeline_stats.get("total_st_calls", 0),
+            matched_dialpad=pipeline_stats.get("matched_dialpad", 0),
+            written_back=pipeline_stats.get("written_back", 0),
+            reason_field_updated=pipeline_stats.get("reason_field_updated", 0),
         )
         try:
             send_report(

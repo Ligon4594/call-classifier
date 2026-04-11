@@ -38,7 +38,7 @@ def run_pipeline(
     enrich_recaps: bool = True,
     skip_already_classified: bool = True,
     verbose: bool = True,
-) -> list[Classification]:
+) -> tuple[list[Classification], dict]:
     """Run the full classify pipeline for a date range.
 
     Args:
@@ -56,13 +56,21 @@ def run_pipeline(
         verbose: If True, print progress to stderr.
 
     Returns:
-        List of Classification objects (one per call processed).
+        Tuple of (classifications, stats) where stats is a dict with keys:
+        total_st_calls, matched_dialpad, written_back, reason_field_updated.
     """
     log = _make_logger(verbose)
+    stats: dict = {
+        "total_st_calls": 0,
+        "matched_dialpad": 0,
+        "written_back": 0,
+        "reason_field_updated": 0,
+    }
 
     # ---- Step 1: Pull all ServiceTitan calls in the date range ----
     log(f"Step 1: Pulling ServiceTitan calls ({start_date} to {end_date})...")
     st_calls = st_client.get_all_calls(start_date=start_date, end_date=end_date)
+    stats["total_st_calls"] = len(st_calls)
     log(f"  Got {len(st_calls)} calls from ServiceTitan.")
 
     # Optionally filter out calls that already have a classification.
@@ -92,6 +100,7 @@ def run_pipeline(
     log("Step 3: Linking ServiceTitan calls to Dialpad calls...")
     linked = link_batch(st_calls, dp_calls, window_seconds=120)
     matched = sum(1 for lc in linked if lc.dialpad is not None)
+    stats["matched_dialpad"] = matched
     log(f"  {matched}/{len(linked)} calls matched to Dialpad records.")
 
     # ---- Step 3b: Enrich matched calls with full Dialpad recaps ----
@@ -132,13 +141,39 @@ def run_pipeline(
     # ---- Step 5: Write back to ServiceTitan (if enabled) ----
     if write_back:
         log("Step 5: Writing classifications back to ServiceTitan...")
+
+        # Fetch ServiceTitan's call reason list so we can set the actual
+        # Call Reason field (not just the memo) when the name matches.
+        reason_name_to_id: dict[str, int] = {}
+        try:
+            st_reasons = st_client.get_call_reasons()
+            reason_name_to_id = {
+                _normalize_reason_name(r.get("name", "")): r["id"]
+                for r in st_reasons
+                if r.get("name") and r.get("id")
+            }
+            log(f"  Loaded {len(reason_name_to_id)} call reasons from ServiceTitan for ID mapping.")
+        except Exception as e:
+            log(f"  Warning: couldn't load call reasons from ServiceTitan — will use memo only. ({e})")
+
         written = 0
+        reason_field_updated = 0
         for result in classifications:
             if result.confidence < 0.7:
                 continue  # Skip low-confidence — let a human review these.
             try:
+                # For call_reason classifications, try to look up the ServiceTitan
+                # reason ID so we update the actual Call Reason field, not just
+                # the memo. Job type classifications only get the memo since the
+                # job record already carries the type.
+                call_reason_id: Optional[int] = None
+                if result.classification_type == "call_reason":
+                    norm = _normalize_reason_name(result.classification_value)
+                    call_reason_id = reason_name_to_id.get(norm)
+
                 st_client.write_classification(
                     call_id=result.call_id,
+                    call_reason_id=call_reason_id,
                     memo=(
                         f"[Auto-classified] {result.classification_type}: "
                         f"{result.classification_value} (confidence: {result.confidence:.2f}). "
@@ -146,9 +181,16 @@ def run_pipeline(
                     ),
                 )
                 written += 1
+                if call_reason_id is not None:
+                    reason_field_updated += 1
             except Exception as e:
                 log(f"  Error writing back call {result.call_id}: {e}")
+
+        stats["written_back"] = written
+        stats["reason_field_updated"] = reason_field_updated
         log(f"  Wrote {written} classifications back to ServiceTitan.")
+        log(f"    - Call Reason field updated: {reason_field_updated}")
+        log(f"    - Memo-only (no ST reason ID match): {written - reason_field_updated}")
     else:
         log("Step 5: Write-back disabled (dry run). No changes made to ServiceTitan.")
 
@@ -159,7 +201,7 @@ def run_pipeline(
     log(f"  Low-confidence (needs review): {summary['low_confidence']}")
     log(f"  Top classifications: {list(summary['by_value'].items())[:5]}")
 
-    return classifications
+    return classifications, stats
 
 
 def summarize(classifications: Iterable[Classification]) -> dict:
@@ -185,6 +227,17 @@ def summarize(classifications: Iterable[Classification]) -> dict:
         "missed_bookings": missed,
         "low_confidence": low_conf,
     }
+
+
+def _normalize_reason_name(name: str) -> str:
+    """Normalize a call reason name for fuzzy matching.
+
+    Handles formatting differences between our rulebook and ServiceTitan's
+    stored names, e.g.:
+      Our name:  "Wrong Number / Hang Up / Spam"
+      ST name:   "Wrong Number/Hang Up/Spam"
+    """
+    return name.lower().replace(" / ", "/").replace("  ", " ").strip()
 
 
 def _make_logger(verbose: bool):
