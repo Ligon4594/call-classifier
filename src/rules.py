@@ -68,9 +68,23 @@ CALL_REASONS: list[ClassificationOption] = [
     ),
     ClassificationOption(
         name="Demand",
-        definition="Customer is calling to request an immediate or urgent service visit.",
-        use_when="Caller needs same-day or next-day service and the call does not result in a booked job.",
-        notes="May include price shoppers and those who want over-the-phone pricing.",
+        definition=(
+            "Customer is calling to request an immediate or urgent service visit, OR is asking about "
+            "pricing/cost for a repair, part, or refrigerant to fix their existing HVAC system. "
+            "This includes callers who are price-shopping for a service call, asking what a diagnostic "
+            "costs, asking about the price of a part, or asking how much it would be to recharge or "
+            "repair their current unit — as opposed to replacing it entirely."
+        ),
+        use_when=(
+            "Caller needs same-day or next-day service and the call does not result in a booked job. "
+            "Also use when the caller is asking about the cost to fix, repair, recharge, or service "
+            "their existing system (parts, refrigerant, labor for a repair). "
+            "Do NOT use if they are asking for a quote to replace the whole system — use Estimate Request -- HVAC for that."
+        ),
+        notes=(
+            "Key distinction: Demand = fix/repair the existing system. "
+            "Estimate Request -- HVAC = replace or install a new system."
+        ),
         confirmed=False,
     ),
     ClassificationOption(
@@ -82,9 +96,19 @@ CALL_REASONS: list[ClassificationOption] = [
     ),
     ClassificationOption(
         name="Estimate Request -- HVAC",
-        definition="Caller is requesting a quote or estimate for HVAC installation, replacement, or repair.",
-        use_when="Caller asks about HVAC pricing, system replacement, or new installation.",
-        notes="May include price shoppers.",
+        definition=(
+            "Caller is requesting a quote or estimate specifically for a full HVAC system replacement "
+            "or brand-new system installation — NOT for repairs, parts, or refrigerant on an existing system."
+        ),
+        use_when=(
+            "Caller is asking for a price to replace their entire HVAC system, install a new system, "
+            "or get an in-home estimate for new equipment. "
+            "Do NOT use if the caller is asking about the cost to repair or service their existing unit — use Demand for that."
+        ),
+        notes=(
+            "Key distinction: Estimate Request -- HVAC = new system or full replacement. "
+            "Demand = repair, part, refrigerant, or service call on the existing system."
+        ),
         confirmed=False,
     ),
     ClassificationOption(
