@@ -225,7 +225,7 @@ def run_pipeline(
                     continue
 
                 job_id = call_job_map.get(result.call_id)
-                if job_id is not None:
+                if job_id:  # 0 and None both mean no booking in ServiceTitan
                     continue  # Has a booking — job type is already on the job record.
 
                 # Unbooked job_type = missed service call. Write "Missed Call" reason.
@@ -266,7 +266,7 @@ def run_pipeline(
         if result.confidence < 0.7:
             continue
         st_call = st_call_map.get(result.call_id)
-        if not st_call or not st_call.job_id:
+        if not st_call or not st_call.job_id:  # 0 and None both mean no booking
             continue  # Unbooked calls are handled by the missed-booking logic above
         actual_raw = st_call.job_type_name or ""
         if not actual_raw or actual_raw == "Imported Default JobType":
