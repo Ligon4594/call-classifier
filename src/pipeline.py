@@ -69,7 +69,9 @@ def run_pipeline(
 
     # ---- Step 1: Pull all ServiceTitan calls in the date range ----
     log(f"Step 1: Pulling ServiceTitan calls ({start_date} to {end_date})...")
-    st_calls = st_client.get_all_calls(start_date=start_date, end_date=end_date)
+    # ServiceTitan uses `createdBefore` (exclusive), so add 1 day to make the
+    # end_date inclusive (e.g. --end 2026-03-28 should include all of March 28).
+    st_calls = st_client.get_all_calls(start_date=start_date, end_date=end_date + timedelta(days=1))
     stats["total_st_calls"] = len(st_calls)
     log(f"  Got {len(st_calls)} calls from ServiceTitan.")
 
