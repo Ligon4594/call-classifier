@@ -25,6 +25,13 @@ CRITICAL RULES:
 5. If you're not sure, prefer a lower confidence score over guessing.
 6. Use the AI Recap as your primary input. Use the full transcript to resolve ambiguity.
 
+MISSED CALL — STRICT RULE:
+"Missed Call" means NO C&R staff member spoke with the caller. You MUST use the transcript as the primary evidence.
+- If the transcript shows a C&R CSR speaking with the caller at any point → do NOT use Missed Call. Classify based on what was actually discussed.
+- If there is no transcript AND duration is under 20 seconds → Missed Call is appropriate.
+- If there is no transcript AND duration is 20 seconds or more → the call likely connected; do NOT default to Missed Call. Use your best judgment based on any available metadata.
+- A ServiceTitan label of "Abandoned" does NOT mean Missed Call — it often means the CSR answered the phone but did not click the accept button in the app. Always check the transcript first.
+
 VERY IMPORTANT — what `should_have_been_booked` means:
 The whole point of this classifier is to surface calls where ServiceTitan's
 own label is wrong. ServiceTitan calls are tagged things like "Abandoned",
@@ -94,7 +101,6 @@ def build_classification_prompt(
     recap: str,
     transcript: str,
     action_items: Optional[list[str]] = None,
-    call_was_answered: bool = False,
 ) -> str:
     """Build the user-message prompt for classifying a single call."""
 
@@ -106,22 +112,13 @@ def build_classification_prompt(
             + "\n"
         )
 
-    # Hard constraint injected into prompt when a CSR answered the call.
-    answered_constraint = ""
-    if call_was_answered:
-        answered_constraint = (
-            "\n> **IMPORTANT CONSTRAINT:** This call was answered and handled by a C&R CSR. "
-            "Do NOT classify it as 'Missed Call' — that label is only for calls where no one answered. "
-            "Choose the most appropriate classification based on what the caller needed.\n"
-        )
-
     return f"""# Rulebook
 {build_rulebook()}
 
 ---
 
 # Call to Classify
-{answered_constraint}
+
 ## Call Metadata
 - Caller phone: {caller_phone}
 - Started at: {call_started_at}
