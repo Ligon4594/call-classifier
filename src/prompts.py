@@ -94,6 +94,7 @@ def build_classification_prompt(
     recap: str,
     transcript: str,
     action_items: Optional[list[str]] = None,
+    call_was_answered: bool = False,
 ) -> str:
     """Build the user-message prompt for classifying a single call."""
 
@@ -105,13 +106,22 @@ def build_classification_prompt(
             + "\n"
         )
 
+    # Hard constraint injected into prompt when a CSR answered the call.
+    answered_constraint = ""
+    if call_was_answered:
+        answered_constraint = (
+            "\n> **IMPORTANT CONSTRAINT:** This call was answered and handled by a C&R CSR. "
+            "Do NOT classify it as 'Missed Call' — that label is only for calls where no one answered. "
+            "Choose the most appropriate classification based on what the caller needed.\n"
+        )
+
     return f"""# Rulebook
 {build_rulebook()}
 
 ---
 
 # Call to Classify
-
+{answered_constraint}
 ## Call Metadata
 - Caller phone: {caller_phone}
 - Started at: {call_started_at}

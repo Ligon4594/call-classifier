@@ -85,6 +85,11 @@ class Classifier:
             st_label_parts.append(f"job={st_call.job_number}")
         servicetitan_label = " | ".join(p for p in st_label_parts if p)
 
+        # A call is "answered" when a real CSR name is on record (agent_name is set
+        # in ServiceTitan or Dialpad resolved an internal user). Avoca calls are
+        # already filtered before this point, so any named agent here is a real person.
+        call_was_answered = bool(csr_name and csr_name.lower() != "unknown")
+
         prompt = build_classification_prompt(
             caller_phone=st_call.caller_phone,
             call_started_at=st_call.received_at.isoformat(),
@@ -94,6 +99,7 @@ class Classifier:
             recap=(dp_call.recap if dp_call else "(no Dialpad match — no recap available)"),
             transcript=(dp_call.transcript if dp_call else "(no Dialpad match — no transcript available)"),
             action_items=(dp_call.action_items if dp_call else None),
+            call_was_answered=call_was_answered,
         )
 
         if self.mode == "dry_run":
