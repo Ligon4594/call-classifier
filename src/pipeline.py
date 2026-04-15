@@ -349,12 +349,19 @@ def _normalize_job_type(name: str) -> str:
 def _normalize_reason_name(name: str) -> str:
     """Normalize a call reason name for fuzzy matching.
 
-    Handles formatting differences between our rulebook and ServiceTitan's
-    stored names, e.g.:
-      Our name:  "Wrong Number / Hang Up / Spam"
-      ST name:   "Wrong Number/Hang Up/Spam"
+    Handles known formatting differences between our rulebook and what
+    ServiceTitan stores, e.g.:
+      "Wrong Number / Hang Up / Spam"  ↔  "Wrong Number/Hang Up/Spam"
+      "Estimate Request -- HVAC"       ↔  "Estimate Request-HVAC"
+      "Vendor / Marketing"             ↔  "Vendor/marketing"
     """
-    return name.lower().replace(" / ", "/").replace("  ", " ").strip()
+    import re
+    n = name.lower().strip()
+    n = n.replace(" / ", "/")   # "Wrong Number / Hang Up" → "wrong number/hang up"
+    n = re.sub(r"\s*--\s*", "-", n)   # "Estimate Request -- HVAC" → "estimate request-hvac"
+    n = re.sub(r"\s+-\s+", "-", n)   # "Estimate Request - HVAC" → "estimate request-hvac"
+    n = re.sub(r"\s+", " ", n)  # collapse double spaces
+    return n
 
 
 def _make_logger(verbose: bool):

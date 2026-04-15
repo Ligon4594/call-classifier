@@ -2,7 +2,7 @@
 Approved Call Classification Definitions for C&R Services.
 
 Source of truth: Call_Classification_Definitions_APPROVED.docx
-Approved by: Taylor Ligon on 2026-04-09
+Approved by: Taylor Ligon on 2026-04-14 (updated call reasons)
 DO NOT modify these definitions without Taylor's explicit approval.
 
 Structure:
@@ -38,7 +38,10 @@ CALL_REASONS: list[ClassificationOption] = [
     ),
     ClassificationOption(
         name="Callback / Recall",
-        definition="Return visit requested due to a prior repair or installation issue that may be tech-related.",
+        definition=(
+            "Unit not working properly due to recent repair or installation issue that may be tech-related. "
+            "(within 45 days)."
+        ),
         use_when="Within ~45 days of the original job and the customer believes the issue is related to prior work.",
         notes=(
             "This should only be used if the customer does not want us to come back out to fix the issue "
@@ -55,7 +58,10 @@ CALL_REASONS: list[ClassificationOption] = [
     ),
     ClassificationOption(
         name="Contractor Contact",
-        definition="Call is from a contractor, builder, or trade professional rather than a residential customer.",
+        definition=(
+            "Call is from a contractor, builder, or trade professional rather than a residential customer. "
+            "Someone calling to inquire about a hiring opportunity."
+        ),
         use_when=(
             "Caller identifies themselves as a contractor, builder, or is inquiring about commercial/construction work. "
             "Or about available job openings."
@@ -91,7 +97,7 @@ CALL_REASONS: list[ClassificationOption] = [
         name="Estimate Request -- Duct Cleaning",
         definition="Caller is requesting a quote or estimate specifically for duct cleaning services.",
         use_when="Caller asks about pricing, scheduling, or availability for duct cleaning.",
-        notes="May include price shoppers.",
+        notes="May include price shoppers looking for duct cleaning prices.",
         confirmed=False,
     ),
     ClassificationOption(
@@ -113,9 +119,15 @@ CALL_REASONS: list[ClassificationOption] = [
     ),
     ClassificationOption(
         name="Follow Up Call",
-        definition="Outbound or inbound call to follow up on a previous estimate, proposal, or completed job.",
-        use_when="Call is a check-in after a visit, estimate, or to confirm customer satisfaction. Or appointment verification.",
-        notes="Should reference a prior job or estimate in ServiceTitan.",
+        definition=(
+            "Outbound or inbound call to follow up on a previous or current estimate, proposal, or job. "
+            "If the customer already has a job booked and is calling to verify or change appointment time."
+        ),
+        use_when=(
+            "Outbound calls of this nature would be to check-in after a visit, estimate, or to confirm "
+            "customer satisfaction. Or appointment verification."
+        ),
+        notes="Should reference a prior job or estimate in ServiceTitan. Or returning a phone call from a tech.",
         confirmed=False,
     ),
     ClassificationOption(
@@ -130,7 +142,7 @@ CALL_REASONS: list[ClassificationOption] = [
     ),
     ClassificationOption(
         name="Missed Call",
-        definition="Call was received but not answered; no voicemail or sufficient information was left.",
+        definition="Inbound call came but was not answered.",
         use_when="Call was abandoned or dropped with no customer interaction or message.",
         notes="Attempt callback. Log outcome.",
         confirmed=True,
@@ -191,11 +203,7 @@ JOB_TYPES: list[ClassificationOption] = [
         name="Bathroom Install",
         definition="Full bathroom remodel installation using BCI Acrylics products.",
         use_when="Estimate was accepted and customer approved the bathroom remodel project.",
-        notes=(
-            "9-hour duration. High priority. This usually happens from an estimate that sells first. "
-            "Process flows through Project Manager first to get equipment requisitioned and team assignments, "
-            "then we reach out to customer with 'soonest available' and 'next available' options."
-        ),
+        notes="9-hour duration. High priority. Process flows through Project Manager first.",
         confirmed=True,
     ),
     ClassificationOption(

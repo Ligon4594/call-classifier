@@ -40,6 +40,29 @@ from .models import ServiceTitanCall
 SERVICETITAN_API_BASE = "https://api.servicetitan.io"
 SERVICETITAN_AUTH_URL = "https://auth.servicetitan.io/connect/token"
 
+# ---------------------------------------------------------------------------
+# FALLBACK REASON IDs
+# Hardcoded IDs for call reasons that may never appear in recent call history
+# (e.g. "Missed Call" before it has ever been written back by this app).
+#
+# HOW TO POPULATE: run discover_reason_ids.command from your Mac, look at the
+# "ALL FOUND REASON IDs" section, and fill in any missing entries here.
+# Format: "Exact Reason Name as shown in ServiceTitan": <integer ID>
+# ---------------------------------------------------------------------------
+FALLBACK_REASON_IDS: dict[str, int] = {
+    # Confirmed from successful write-backs in the April 2026 pipeline run.
+    # Not discoverable via history scrape because ST API returns oldest-first
+    # and these were only written recently (past page 20 in a 365-day window).
+    "Demand": 57027113,
+
+    # --- ADD THESE AFTER CREATING THEM IN SERVICETITAN ---
+    # Go to ServiceTitan → Settings → Call Reasons → New Call Reason
+    # Add each name below, save, then note the ID from the URL or list.
+    # "Missed Call": <ID>,                    ← needed for ~42 missed calls/week
+    # "Estimate Request -- Duct Cleaning": <ID>,
+    # "Maintenance": <ID>,
+}
+
 
 class ServiceTitanAPIError(Exception):
     """Raised when a ServiceTitan API call fails."""
@@ -304,33 +327,62 @@ class ServiceTitanClient:
     def get_call_reasons(self) -> list[dict]:
         """Return a list of {"id": <int>, "name": <str>} reason dicts.
 
-        ServiceTitan has no working GET /call-reasons list endpoint accessible
-        via standard API scopes. Diagnostic testing confirmed every candidate
-        path returns 404.
+        Strategy (tried in order):
+        1. Try the /settings/v2 call-reasons endpoint — fast and complete if
+           the app's scopes allow it.
+        2. Fall back to scraping call history — look back 365 days across up to
+           10 pages (2,000 calls) to maximise coverage of distinct reason IDs.
+        3. Merge in FALLBACK_REASON_IDS for any reasons that have never appeared
+           in call history (e.g. "Missed Call" before it's first written back).
 
-        Instead we extract reason IDs from recent call records — any call that
-        already has a reason set tells us {"id": X, "name": "Y"}. We pull two
-        pages (400 calls) to maximise coverage of distinct reasons in use.
-
-        This approach means we can only map to reasons that appear in recent
-        call history. In practice that covers all active call reasons since
-        ServiceTitan reports populated them for existing calls.
+        Returns a merged deduplicated list with the most comprehensive coverage
+        possible.
         """
+        import sys
         from datetime import date, timedelta
 
         seen: dict[int, str] = {}  # id → name, deduped
 
-        # Pull last ~60 days in 2-page batches to capture all active reasons.
-        today = date.today()
-        start = today - timedelta(days=60)
+        # ── Attempt 1: settings endpoint ────────────────────────────────────
+        # This returns ALL call reasons regardless of usage history.
+        # Requires the "Settings" read scope on the ST app key.
+        settings_paths = [
+            f"/settings/v2/tenant/{self.tenant_id}/call-reasons",
+            f"/settings/v2/tenant/{self.tenant_id}/callreasons",
+            f"/jbp/v2/tenant/{self.tenant_id}/call-reasons",
+        ]
+        for path in settings_paths:
+            try:
+                data = self._get(path, params={"page": 1, "pageSize": 200})
+                items = data.get("data") or (data if isinstance(data, list) else [])
+                if items:
+                    for item in items:
+                        rid = item.get("id")
+                        rname = item.get("name") or item.get("displayName") or ""
+                        if rid and rname:
+                            seen[rid] = rname
+                    print(f"  [get_call_reasons] settings endpoint worked: {path} → {len(seen)} reasons", file=sys.stderr)
+                    break  # Got a good result — skip scraping
+            except Exception:
+                pass  # This path doesn't work — try the next one
 
-        for page in range(1, 3):
+        # ── Attempt 2: scrape call history ──────────────────────────────────
+        # Needed when settings endpoint returns 404. The ST API returns calls
+        # in ascending (oldest-first) order, so a 365-day window may not reach
+        # recently-written reasons (e.g. "Demand") before hitting the page cap.
+        # Fix: scrape BOTH ends of the window — last 90 days first (to capture
+        # recent writes), then the historical 365-day window for older ones.
+        today = date.today()
+
+        # Recent window (last 90 days) — catches reasons written in recent runs.
+        recent_start = today - timedelta(days=90)
+        for page in range(1, 6):
             try:
                 path = f"/telecom/v2/tenant/{self.tenant_id}/calls"
                 data = self._get(path, params={
                     "page": page,
                     "pageSize": 200,
-                    "createdOnOrAfter": start.isoformat(),
+                    "createdOnOrAfter": recent_start.isoformat(),
                     "createdBefore": today.isoformat(),
                 })
                 items = data.get("data") or []
@@ -343,6 +395,38 @@ class ServiceTitanClient:
                     break
             except Exception:
                 break
+
+        # Historical window (365 days) — catches older/less-used reasons.
+        hist_start = today - timedelta(days=365)
+        for page in range(1, 11):
+            try:
+                path = f"/telecom/v2/tenant/{self.tenant_id}/calls"
+                data = self._get(path, params={
+                    "page": page,
+                    "pageSize": 200,
+                    "createdOnOrAfter": hist_start.isoformat(),
+                    "createdBefore": today.isoformat(),
+                })
+                items = data.get("data") or []
+                for item in items:
+                    call = item.get("leadCall") or {}
+                    reason = call.get("reason") or {}
+                    if isinstance(reason, dict) and reason.get("id") and reason.get("name"):
+                        seen[reason["id"]] = reason["name"]
+                if not data.get("hasMore"):
+                    break
+            except Exception:
+                break
+
+        # ── Attempt 3: merge hardcoded fallback for never-used reasons ───────
+        # Any reason in FALLBACK_REASON_IDS that isn't already in `seen` gets
+        # added. This handles the chicken-and-egg case where a reason (e.g.
+        # "Missed Call") has never been written back so it never appears in
+        # call history.
+        for rname, rid in FALLBACK_REASON_IDS.items():
+            # Only add if we don't already have this name from a live source
+            if rid not in seen:
+                seen[rid] = rname
 
         return [{"id": rid, "name": rname} for rid, rname in seen.items()]
 
