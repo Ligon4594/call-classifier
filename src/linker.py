@@ -34,6 +34,19 @@ def normalize_phone(phone: str) -> str:
     return digits[-10:] if len(digits) >= 10 else digits
 
 
+def _customer_phone(st_call: ServiceTitanCall) -> str:
+    """Return the customer-side phone number for a ServiceTitan call.
+
+    For inbound calls the customer is the caller (leadCall.from).
+    For outbound calls the customer is the callee (leadCall.to) — the agent's
+    line is stored in 'from', which is the same number on every outbound call
+    and would never match against Dialpad's external_number index.
+    """
+    if st_call.direction.lower() == "outbound":
+        return normalize_phone(st_call.callee_phone or st_call.caller_phone)
+    return normalize_phone(st_call.caller_phone)
+
+
 def link_call(
     st_call: ServiceTitanCall,
     dp_client: DialpadClient,
@@ -45,7 +58,7 @@ def link_call(
     Makes a Dialpad API call (get_calls_in_window) for each ST call.
     Use link_batch() instead for pipeline runs.
     """
-    st_phone = normalize_phone(st_call.caller_phone)
+    st_phone = _customer_phone(st_call)
 
     window = timedelta(seconds=window_seconds)
     candidates = dp_client.get_calls_in_window(
@@ -78,7 +91,9 @@ def link_batch(
 
     results: list[LinkedCall] = []
     for st_call in st_calls:
-        st_phone = normalize_phone(st_call.caller_phone)
+        # Use the customer-side phone for matching — for outbound calls this is
+        # callee_phone (leadCall.to), not caller_phone (the agent's own line).
+        st_phone = _customer_phone(st_call)
         candidates = dp_by_phone.get(st_phone, [])
 
         # Filter to time window (ensure tz-aware to avoid crash)

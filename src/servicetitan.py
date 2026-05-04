@@ -50,17 +50,18 @@ SERVICETITAN_AUTH_URL = "https://auth.servicetitan.io/connect/token"
 # Format: "Exact Reason Name as shown in ServiceTitan": <integer ID>
 # ---------------------------------------------------------------------------
 FALLBACK_REASON_IDS: dict[str, int] = {
-    # Confirmed from successful write-backs in the April 2026 pipeline run.
-    # Not discoverable via history scrape because ST API returns oldest-first
-    # and these were only written recently (past page 20 in a 365-day window).
+    # IDs confirmed from ServiceTitan Settings → Call Reasons → Edit URLs
+    # and from observed write-back logs. These ensure the pipeline can always
+    # write critical reasons even if the history scrape doesn't pick them up.
     "Demand": 57027113,
-
-    # --- ADD THESE AFTER CREATING THEM IN SERVICETITAN ---
-    # Go to ServiceTitan → Settings → Call Reasons → New Call Reason
-    # Add each name below, save, then note the ID from the URL or list.
-    # "Missed Call": <ID>,                    ← needed for ~42 missed calls/week
-    # "Estimate Request -- Duct Cleaning": <ID>,
-    # "Maintenance": <ID>,
+    "Missed Call": 57284521,
+    "Maintenance": 57026985,
+    "Estimate Request -- Duct Cleaning": 58238634,
+    # Follow Up Call is the GUARANTEED FALLBACK for any answered call we can't
+    # confidently re-classify — must always be present in the reason map.
+    "Follow Up Call": 69,
+    # Wrong Number / Hang Up / Spam — used to short-circuit answered+short calls.
+    "Wrong Number / Hang Up / Spam": 58528297,
 }
 
 
@@ -562,8 +563,10 @@ def _build_st_call(item_json: dict) -> ServiceTitanCall:
     # Call ID
     call_id = str(call.get("id") or "")
 
-    # Phone (10-digit string like "9032161247")
+    # Phone numbers — for inbound calls "from" is the customer, "to" is the agent line.
+    # For outbound calls it's reversed: "from" is the agent, "to" is the customer.
     caller_phone = call.get("from") or ""
+    callee_phone = call.get("to") or ""
 
     # Direction
     direction = call.get("direction") or ""
@@ -630,6 +633,7 @@ def _build_st_call(item_json: dict) -> ServiceTitanCall:
     return ServiceTitanCall(
         call_id=call_id,
         caller_phone=caller_phone,
+        callee_phone=callee_phone,
         direction=direction,
         received_at=received_at,
         duration_seconds=duration_seconds,

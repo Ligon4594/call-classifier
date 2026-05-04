@@ -25,12 +25,26 @@ CRITICAL RULES:
 5. If you're not sure, prefer a lower confidence score over guessing.
 6. Use the AI Recap as your primary input. Use the full transcript to resolve ambiguity.
 
-MISSED CALL — STRICT RULE:
-"Missed Call" means NO C&R staff member spoke with the caller. You MUST use the transcript as the primary evidence.
-- If the transcript shows a C&R CSR speaking with the caller at any point → do NOT use Missed Call. Classify based on what was actually discussed.
-- If there is no transcript AND duration is under 20 seconds → Missed Call is appropriate.
-- If there is no transcript AND duration is 20 seconds or more → the call likely connected; do NOT default to Missed Call. Use your best judgment based on any available metadata.
-- A ServiceTitan label of "Abandoned" does NOT mean Missed Call — it often means the CSR answered the phone but did not click the accept button in the app. Always check the transcript first.
+MISSED CALL — STRICT RULE (READ CAREFULLY):
+"Missed Call" means the phone rang at C&R and NO ONE picked up. It is NOT a catch-all for "I'm not sure what this call was about."
+
+Use these tests in order:
+
+1. Is there ANY transcript or AI Recap content? → A transcript only exists if the call was answered. NEVER classify a call with transcript content as "Missed Call". Pick the best Call Reason from the rulebook based on what was discussed.
+
+2. Is the duration 20 seconds or more? → A truly missed call rings ~5 sec then drops. 20+ seconds means someone almost certainly picked up. Do NOT default to Missed Call. If you have no other context, choose "Follow Up Call" as a safe placeholder rather than "Missed Call".
+
+3. Did Dialpad report a connection (any non-zero connected_seconds)? → Same as above — pick a reason other than Missed Call.
+
+4. Does ServiceTitan label this "Abandoned"? → IGNORE that label for Missed Call purposes. ST stamps "Abandoned" whenever the CSR didn't click the green "Accept" button in the ServiceTitan agent UI, even if they picked up the actual phone. The ST label is NOT evidence of a missed call.
+
+ONLY classify as "Missed Call" when ALL of these are true:
+  - No transcript content at all, AND
+  - Duration is under 20 seconds (or 0), AND
+  - No named CSR is attributed, AND
+  - No Dialpad connection evidence
+
+When in doubt, prefer "Follow Up Call" over "Missed Call". Writing a false Missed Call hides real customer interactions from leadership reports — that is a worse error than over-classifying as Follow Up Call.
 
 VERY IMPORTANT — what `should_have_been_booked` means:
 The whole point of this classifier is to surface calls where ServiceTitan's
@@ -101,8 +115,17 @@ def build_classification_prompt(
     recap: str,
     transcript: str,
     action_items: Optional[list[str]] = None,
+    force_call_reason: bool = False,
 ) -> str:
-    """Build the user-message prompt for classifying a single call."""
+    """Build the user-message prompt for classifying a single call.
+
+    If force_call_reason=True, an extra instruction is added telling the
+    classifier to return a Call Reason rather than a Job Type. This is used
+    for calls that were answered by a CSR but no job was booked — the
+    classifier should identify what the call was actually about (Follow Up
+    Call, Estimate Request, etc.) rather than defaulting to a job type or
+    Missed Call.
+    """
 
     action_items_block = ""
     if action_items:
@@ -111,6 +134,18 @@ def build_classification_prompt(
             + "\n".join(f"- {item}" for item in action_items)
             + "\n"
         )
+
+    force_call_reason_block = ""
+    if force_call_reason:
+        force_call_reason_block = """
+## Important Context
+A C&R CSR spoke with this caller but NO job was booked from the call.
+You MUST return a Call Reason (classification_type = "call_reason"), not a Job Type.
+Do NOT return "Missed Call" — someone answered this call.
+Identify the actual purpose of the call from the transcript and recap (e.g. Follow Up
+Call, Estimate Request, Demand, Warranty Work inquiry, Cancellation, etc.) and pick
+the best matching Call Reason from the rulebook.
+"""
 
     return f"""# Rulebook
 {build_rulebook()}
@@ -125,7 +160,7 @@ def build_classification_prompt(
 - Duration: {duration_seconds} seconds
 - Handled by (C&R CSR): {csr_name}
 - ServiceTitan's own label for this call: "{servicetitan_label}"
-
+{force_call_reason_block}
 ## Dialpad AI Recap
 {recap or "(no recap available)"}
 {action_items_block}

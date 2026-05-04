@@ -63,8 +63,16 @@ class Classifier:
         self,
         st_call: ServiceTitanCall,
         dp_call: Optional[DialpadCall],
+        *,
+        force_call_reason: bool = False,
     ) -> Classification:
-        """Classify a single call. dp_call may be None if no Dialpad match was found."""
+        """Classify a single call. dp_call may be None if no Dialpad match was found.
+
+        If force_call_reason=True, the prompt instructs the model to return a
+        Call Reason rather than a Job Type. Use this for answered-but-unbooked
+        calls where we want to know WHY the call happened, not what job should
+        have been created.
+        """
 
         # Prefer Dialpad's resolved CSR name (follows operator_call_id), fall
         # back to ServiceTitan's agent name ("Last, First" format), then "unknown".
@@ -94,6 +102,7 @@ class Classifier:
             recap=(dp_call.recap if dp_call else "(no Dialpad match — no recap available)"),
             transcript=(dp_call.transcript if dp_call else "(no Dialpad match — no transcript available)"),
             action_items=(dp_call.action_items if dp_call else None),
+            force_call_reason=force_call_reason,
         )
 
         if self.mode == "dry_run":

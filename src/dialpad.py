@@ -428,7 +428,11 @@ def _build_dialpad_call(
     if date_connected and date_ended and date_ended > date_connected:
         connected_seconds = int((date_ended - date_connected) / 1000)
     else:
-        connected_seconds = duration_seconds
+        # No date_connected → call was never picked up (rang and dropped).
+        # Use 0 here, NOT duration_seconds, because duration includes ring time.
+        # The pipeline's _call_was_answered check relies on this being a true
+        # "was the call actually answered" signal, not "did the call exist."
+        connected_seconds = 0
 
     raw = {"call": call_json}
     if recap:

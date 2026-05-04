@@ -88,11 +88,15 @@ def run_pipeline(
         log(f"  Skipped {avoca_skipped} Avoca-handled call(s) (no transcript access).")
 
     # Optionally filter out calls that already have a classification.
+    # Exception: always re-process calls labeled "Missed Call" — ServiceTitan
+    # stamps this label natively on any "Abandoned" call, even if someone
+    # actually answered. The classifier will correct these when it runs.
     if skip_already_classified:
         before = len(st_calls)
         st_calls = [
             c for c in st_calls
-            if not c.reason_name  # No existing call reason
+            if not c.reason_name                                      # unclassified
+            or (c.reason_name or "").strip().lower() == "missed call" # or wrongly labeled
         ]
         skipped = before - len(st_calls)
         if skipped:
@@ -152,6 +156,9 @@ def run_pipeline(
 
     log(f"  Classified {len(classifications)}/{len(linked)} calls.")
 
+    # Build call lookup map — used in Steps 5 and 6.
+    st_call_map = {lc.servicetitan.call_id: lc.servicetitan for lc in linked}
+
     # ---- Step 5: Write back to ServiceTitan (if enabled) ----
     if write_back:
         log("Step 5: Writing classifications back to ServiceTitan...")
@@ -199,6 +206,30 @@ def run_pipeline(
                 if result.confidence < 0.5:
                     continue
 
+                # ----- ANSWERED-CALL GUARD on the call_reason write path -----
+                # If Claude returned "Missed Call" but the CSR actually answered,
+                # do NOT write Missed Call. Re-classify with force_call_reason and
+                # fall back to "Follow Up Call" — never persist Missed Call on a
+                # call we have positive evidence was answered.
+                if _normalize_reason_name(result.classification_value) == _normalize_reason_name("Missed Call"):
+                    st_call = st_call_map.get(result.call_id)
+                    lc = next((lc for lc in linked if lc.servicetitan.call_id == result.call_id), None)
+                    dp_call = lc.dialpad if lc else None
+                    if _call_was_answered(st_call, dp_call):
+                        _handle_answered_missed_call(
+                            st_call=st_call,
+                            dp_call=dp_call,
+                            result=result,
+                            classifier=classifier,
+                            st_client=st_client,
+                            reason_name_to_id=reason_name_to_id,
+                            log=log,
+                        )
+                        # _handle_answered_missed_call does its own writes/logging.
+                        # Bump written if it succeeded (it logs [ok] either way).
+                        written += 1
+                        continue
+
                 norm = _normalize_reason_name(result.classification_value)
                 call_reason_id: Optional[int] = reason_name_to_id.get(norm)
 
@@ -222,7 +253,11 @@ def run_pipeline(
                 # If the AI sees an HVAC service call but no booking exists in ST,
                 # that's a missed service opportunity. We can't write a job type
                 # to the call record directly, so we stamp "Missed Call" as the
-                # call reason — it shows up in reports and prompts follow-up.
+                # call reason — BUT only if the call was truly abandoned (no real
+                # CSR answered). If a CSR was on the line and just didn't book the
+                # job, "Missed Call" is semantically wrong (it implies no one
+                # picked up). Those calls are flagged in the weekly report for
+                # manual follow-up instead.
                 if result.confidence < 0.5:
                     continue
 
@@ -230,7 +265,59 @@ def run_pipeline(
                 if job_id:  # 0 and None both mean no booking in ServiceTitan
                     continue  # Has a booking — job type is already on the job record.
 
-                # Unbooked job_type = missed service call. Write "Missed Call" reason.
+                # Check whether the call was actually answered. Uses multi-signal
+                # detection (CSR named, duration, Dialpad evidence) — see
+                # _call_was_answered docstring. If answered, we MUST NOT stamp
+                # "Missed Call". Either short-circuit to Wrong Number/Hang Up
+                # (clear hang-up case) or re-classify via transcript.
+                st_call = st_call_map.get(result.call_id)
+                lc = next((lc for lc in linked if lc.servicetitan.call_id == result.call_id), None)
+                dp_call = lc.dialpad if lc else None
+
+                if _call_was_answered(st_call, dp_call):
+                    has_content = dp_call and bool(dp_call.recap or dp_call.transcript)
+                    duration = st_call.duration_seconds if st_call else 0
+
+                    # Short-circuit: CSR answered, no transcript, very short call →
+                    # caller hung up immediately. No need to call Claude.
+                    # (Only short-circuit when ST reports a real but short duration.
+                    # duration=0 from ST is unreliable on Abandoned calls — we let
+                    # those fall through to the re-classify path.)
+                    if not has_content and 0 < duration <= 30:
+                        wn_id = reason_name_to_id.get(_normalize_reason_name("Wrong Number / Hang Up / Spam"))
+                        if wn_id:
+                            try:
+                                st_client.write_classification(
+                                    call_id=result.call_id,
+                                    call_reason_id=wn_id,
+                                    call_reason_name="Wrong Number / Hang Up / Spam",
+                                )
+                                written += 1
+                                log(f"  [ok] call {result.call_id}: answered+short+no transcript → 'Wrong Number / Hang Up / Spam'")
+                            except Exception as e:
+                                log(f"  [error] call {result.call_id}: {e}")
+                        else:
+                            log(f"  [skip] call {result.call_id}: no ST reason ID for 'Wrong Number / Hang Up / Spam'")
+                        continue
+
+                    # Otherwise: CSR answered but no job was booked. Delegate to
+                    # the shared answered-Missed-Call handler — re-classify via
+                    # transcript and ALWAYS fall back to Follow Up Call rather
+                    # than leaving a false "Missed Call" stamp.
+                    _handle_answered_missed_call(
+                        st_call=st_call,
+                        dp_call=dp_call,
+                        result=result,
+                        classifier=classifier,
+                        st_client=st_client,
+                        reason_name_to_id=reason_name_to_id,
+                        log=log,
+                    )
+                    written += 1
+                    continue
+
+                # Truly abandoned call (short duration, no CSR) that looked like
+                # a service inquiry. Write "Missed Call" so it surfaces in ST reports.
                 missed_call_id = reason_name_to_id.get(_normalize_reason_name("Missed Call"))
                 if not missed_call_id:
                     log(f"  [skip] call {result.call_id}: 'Missed Call' reason not in ST reason map")
@@ -243,7 +330,7 @@ def run_pipeline(
                         call_reason_name="Missed Call",
                     )
                     written += 1
-                    log(f"  [ok] call {result.call_id}: unbooked {result.classification_value} → set 'Missed Call' (potential missed booking)")
+                    log(f"  [ok] call {result.call_id}: unbooked {result.classification_value} → set 'Missed Call' (abandoned, potential missed booking)")
                 except Exception as e:
                     log(f"  [error] call {result.call_id}: {e}")
 
@@ -260,7 +347,6 @@ def run_pipeline(
     # prediction against the job type already on the ST booking.  Mismatches at
     # ≥70% confidence are flagged for Taylor to review in the weekly report.
     log("Step 6: Auditing job type accuracy on booked calls...")
-    st_call_map = {lc.servicetitan.call_id: lc.servicetitan for lc in linked}
     mismatches: list[JobTypeMismatch] = []
     for result in classifications:
         if result.classification_type != "job_type":
@@ -328,6 +414,123 @@ def summarize(classifications: Iterable[Classification]) -> dict:
         "missed_bookings": missed,
         "low_confidence": low_conf,
     }
+
+
+def _call_was_answered(st_call: Optional[ServiceTitanCall], dp_call) -> bool:
+    """Determine whether a real human at C&R answered this call.
+
+    Why this is hard: ServiceTitan stamps "Abandoned" + "Missed Call" + duration=0
+    on ANY call where the CSR didn't click the green "Accept" button in the
+    ServiceTitan agent UI — even if the CSR picked up the actual phone. So we
+    can't trust ST's `agent` field, ST's `duration_seconds`, or ST's `callType`
+    individually. We need positive evidence from any of several signals.
+
+    A call is considered ANSWERED if ANY of these are true:
+      (a) A named CSR is attributed (agent ≠ "Abandoned"/"Avoca"/empty)
+      (b) ServiceTitan duration > 20 seconds (real conversation length)
+      (c) Dialpad shows connected_seconds > 0 (Dialpad's authoritative
+          answered-vs-not signal — Dialpad knows whether the call was actually
+          picked up regardless of how ST tagged the agent)
+      (d) Dialpad has any transcript or AI recap content (transcripts only
+          exist for answered calls — Dialpad doesn't transcribe ringing)
+
+    Returns False ONLY when we have no positive evidence of an answer. In any
+    ambiguous case the safe default is to treat the call as answered, because
+    writing a false "Missed Call" is worse than over-classifying an actually-
+    missed call as "Follow Up Call".
+    """
+    # Signal (a): named CSR
+    agent_raw = (st_call.agent_name or "").strip().lower() if st_call else ""
+    if agent_raw and agent_raw not in ("abandoned", "avoca"):
+        return True
+
+    # Signal (b): meaningful ST duration
+    if st_call and st_call.duration_seconds > 20:
+        return True
+
+    # Signal (c): Dialpad confirms call was connected
+    if dp_call and getattr(dp_call, "connected_seconds", 0) > 0:
+        return True
+
+    # Signal (d): Dialpad has transcript content (only generated for answered calls)
+    if dp_call and (getattr(dp_call, "transcript", None) or getattr(dp_call, "recap", None)):
+        return True
+
+    return False
+
+
+def _handle_answered_missed_call(
+    *,
+    st_call,
+    dp_call,
+    result,
+    classifier,
+    st_client,
+    reason_name_to_id: dict,
+    log,
+) -> None:
+    """Handle a call that was answered but Claude wanted to label as Missed Call.
+
+    Flow:
+      1. Re-classify with force_call_reason=True to find the actual reason from
+         the transcript (Follow Up Call, Demand, Estimate Request, etc.).
+      2. If re-classification produces a confident, mappable Call Reason → write it.
+      3. Otherwise → write "Follow Up Call" as the guaranteed safe default.
+
+    A call we have positive evidence was answered must NEVER be left labeled
+    "Missed Call" after this function returns. The fallback always fires.
+    """
+    log(f"  [re-classify] call {result.call_id}: answered "
+        f"(agent='{(st_call.agent_name if st_call and st_call.agent_name else 'unknown')}', "
+        f"duration={st_call.duration_seconds if st_call else '?'}s, "
+        f"dp_connected={getattr(dp_call, 'connected_seconds', 0) if dp_call else 0}s) "
+        f"— pulling transcript to find actual call reason...")
+
+    follow_up_id = reason_name_to_id.get(_normalize_reason_name("Follow Up Call"))
+    written = False
+
+    # Step 1: try a confident re-classification.
+    try:
+        reason_result = classifier.classify(st_call, dp_call, force_call_reason=True)
+        if reason_result.confidence >= 0.5:
+            norm = _normalize_reason_name(reason_result.classification_value)
+            cr_id = reason_name_to_id.get(norm)
+            if cr_id:
+                st_client.write_classification(
+                    call_id=result.call_id,
+                    call_reason_id=cr_id,
+                    call_reason_name=reason_result.classification_value,
+                )
+                log(f"  [ok] call {result.call_id}: answered → '{reason_result.classification_value}' "
+                    f"({reason_result.confidence:.0%})")
+                written = True
+            else:
+                log(f"  [info] call {result.call_id}: re-classified as "
+                    f"'{reason_result.classification_value}' but no ST reason ID — "
+                    f"applying Follow Up Call fallback")
+        else:
+            log(f"  [info] call {result.call_id}: re-classification confidence "
+                f"{reason_result.confidence:.0%} — applying Follow Up Call fallback")
+    except Exception as e:
+        log(f"  [error] call {result.call_id}: re-classification failed: {e} — "
+            f"applying Follow Up Call fallback")
+
+    # Step 2: guaranteed fallback. Answered calls NEVER stay as Missed Call.
+    if not written:
+        if not follow_up_id:
+            log(f"  [error] call {result.call_id}: no ST reason ID for 'Follow Up Call' — "
+                f"cannot apply fallback. Check FALLBACK_REASON_IDS in servicetitan.py")
+            return
+        try:
+            st_client.write_classification(
+                call_id=result.call_id,
+                call_reason_id=follow_up_id,
+                call_reason_name="Follow Up Call",
+            )
+            log(f"  [ok] call {result.call_id}: answered+no-confident-reason → "
+                f"'Follow Up Call' (guaranteed fallback; cleared false Missed Call)")
+        except Exception as e:
+            log(f"  [error] call {result.call_id}: Follow Up Call fallback write failed: {e}")
 
 
 def _normalize_job_type(name: str) -> str:

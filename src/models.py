@@ -14,7 +14,8 @@ class ServiceTitanCall:
     """
 
     call_id: str                    # leadCall.id — ServiceTitan call ID
-    caller_phone: str               # leadCall.from — 10-digit string, e.g. "9032451470"
+    caller_phone: str               # leadCall.from — for inbound: customer; for outbound: agent's line
+    callee_phone: str               # leadCall.to   — for outbound: customer; for inbound: agent's line
     direction: str                  # leadCall.direction — "Inbound" / "Outbound"
     received_at: datetime           # leadCall.receivedOn — ISO timestamp
     duration_seconds: int           # leadCall.duration — parsed from "HH:MM:SS" string
