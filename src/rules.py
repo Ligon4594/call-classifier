@@ -39,15 +39,23 @@ CALL_REASONS: list[ClassificationOption] = [
     ClassificationOption(
         name="Callback / Recall",
         definition=(
-            "Unit not working properly due to recent repair or installation issue that may be tech-related. "
-            "(within 45 days)."
+            "Customer is calling about an issue related to recent C&R work (within ~45 days). "
+            "This is service-recovery, NOT a new demand opportunity. Per Taylor 2026-05-14: "
+            "a recall is whenever a customer calls in because we had already been to the house "
+            "earlier and something is still wrong or related."
         ),
-        use_when="Within ~45 days of the original job and the customer believes the issue is related to prior work.",
+        use_when=(
+            "Within ~45 days of the original job AND the customer connects the current issue to "
+            "the prior visit/work. Common cases: same problem returned, technician install failure, "
+            "issue C&R thought was fixed but isn't, customer dissatisfied with prior diagnosis."
+        ),
         notes=(
-            "This should only be used if the customer does not want us to come back out to fix the issue "
-            "because they had another company come out instead and the issue was resolved by that company."
+            "EGIA bucketing: Callback / Recall is EXCLUDED from booking rate (it's service recovery, "
+            "not a new opportunity). Tracked as its own metric so we can monitor service quality. "
+            "Edge case: if the customer says they had a competitor come out and it's now fixed, "
+            "still classify as Callback / Recall for tracking purposes."
         ),
-        confirmed=False,
+        confirmed=True,
     ),
     ClassificationOption(
         name="Cancellation",
