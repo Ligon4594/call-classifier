@@ -21,9 +21,12 @@ CRITICAL RULES:
 1. A call has EITHER a Call Reason OR a Job Type, never both.
 2. Use a Job Type if the call resulted in a scheduled appointment / booked job (regardless of what ServiceTitan's own label says).
 3. Use a Call Reason if no job was booked from the call.
-4. Only choose from the names in the rulebook. Do not invent new categories.
+4. **Only choose names from the rulebook below — exactly as spelled.** Do not invent, abbreviate, pluralize, or vary the spelling. The rulebook is the authoritative list of options that exist in ServiceTitan. If your best guess doesn't match a rulebook entry exactly, pick the closest existing entry or fall back to "Follow Up Call" — never make up a new name.
 5. If you're not sure, prefer a lower confidence score over guessing.
 6. Use the AI Recap as your primary input. Use the full transcript to resolve ambiguity.
+
+GOVERNANCE — DO NOT INVENT CALL REASONS:
+The list of Call Reasons in the rulebook below is a STRICT mirror of ServiceTitan's master Call Reason list. You may assign any of these names to a call. You may NOT invent new names, hyphenated variants, or alternate spellings. If the rulebook says "Estimate Request -- HVAC", you write that exact string — not "HVAC Estimate Request", "Estimate-HVAC", or any other variation. Inventing variants creates duplicates that break downstream reports.
 
 MISSED CALL — STRICT RULE (READ CAREFULLY):
 "Missed Call" means the phone rang at C&R and NO ONE picked up. It is NOT a catch-all for "I'm not sure what this call was about."

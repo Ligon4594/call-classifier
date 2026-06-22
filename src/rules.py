@@ -5,6 +5,31 @@ Source of truth: Call_Classification_Definitions_APPROVED.docx
 Approved by: Taylor Ligon on 2026-04-14 (updated call reasons)
 DO NOT modify these definitions without Taylor's explicit approval.
 
+═══════════════════════════════════════════════════════════════════════════
+GOVERNANCE RULE (locked in 2026-06-05) — READ THIS BEFORE EDITING
+═══════════════════════════════════════════════════════════════════════════
+
+The call classifier MAY:
+  - Read existing Call Reasons from ServiceTitan
+  - Write/edit the Call Reason field on individual call records
+
+The call classifier MAY NOT:
+  - Add new Call Reason options to ServiceTitan
+  - Activate, deactivate, or rename Call Reason options
+  - Create duplicates or variations of existing Call Reasons
+  - Introduce a Call Reason name in this file that doesn't already exist
+    in ServiceTitan's master Call Reason list
+
+If the classifier needs to assign a Call Reason that doesn't exist in ST,
+the pipeline falls back to "Follow Up Call" (see src/pipeline.py
+follow_up_fallback_id logic). New Call Reasons enter the system only when
+Taylor adds them manually via ServiceTitan Settings → Operations → Call Reasons.
+
+Why this rule exists: uncontrolled additions to the master list create
+duplicates ("Demand" x2, "Estimate Request" double-dash variants, etc.)
+that cause CSRs to pick inconsistent values and break the EGIA reports.
+═══════════════════════════════════════════════════════════════════════════
+
 Structure:
 - A call has EITHER a Call Reason OR a Job Type, never both.
 - Call Reason: used when the call did NOT result in a booked job.
