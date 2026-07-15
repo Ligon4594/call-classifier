@@ -486,7 +486,20 @@ def _handle_answered_missed_call(
         f"dp_connected={getattr(dp_call, 'connected_seconds', 0) if dp_call else 0}s) "
         f"— pulling transcript to find actual call reason...")
 
+    # Fallback selection (updated 2026-07-14 per Taylor):
+    #   - If Dialpad has ANY transcript/recap content → Follow Up Call (real conversation)
+    #   - If NO transcript content → Wrong Number / Hang Up / Spam (CSR picked up but
+    #     nobody was really there). Taylor's rule: "If a CSR picks up and nobody is
+    #     there, it counts as a hang up." Follow Up Call is reserved for calls with
+    #     evidence of a real conversation about a prior job/estimate.
+    has_content = dp_call and bool(
+        getattr(dp_call, "recap", None) or getattr(dp_call, "transcript", None)
+    )
     follow_up_id = reason_name_to_id.get(_normalize_reason_name("Follow Up Call"))
+    hangup_id    = reason_name_to_id.get(_normalize_reason_name("Wrong Number / Hang Up / Spam"))
+    fallback_id, fallback_name = (
+        (follow_up_id, "Follow Up Call") if has_content else (hangup_id, "Wrong Number / Hang Up / Spam")
+    )
     written = False
 
     # Step 1: try a confident re-classification.
@@ -507,30 +520,32 @@ def _handle_answered_missed_call(
             else:
                 log(f"  [info] call {result.call_id}: re-classified as "
                     f"'{reason_result.classification_value}' but no ST reason ID — "
-                    f"applying Follow Up Call fallback")
+                    f"applying '{fallback_name}' fallback")
         else:
             log(f"  [info] call {result.call_id}: re-classification confidence "
-                f"{reason_result.confidence:.0%} — applying Follow Up Call fallback")
+                f"{reason_result.confidence:.0%} — applying '{fallback_name}' fallback")
     except Exception as e:
         log(f"  [error] call {result.call_id}: re-classification failed: {e} — "
-            f"applying Follow Up Call fallback")
+            f"applying '{fallback_name}' fallback")
 
     # Step 2: guaranteed fallback. Answered calls NEVER stay as Missed Call.
+    # Fallback is Wrong Number / Hang Up / Spam by default (no transcript = no
+    # real conversation), or Follow Up Call only when transcript evidence exists.
     if not written:
-        if not follow_up_id:
-            log(f"  [error] call {result.call_id}: no ST reason ID for 'Follow Up Call' — "
+        if not fallback_id:
+            log(f"  [error] call {result.call_id}: no ST reason ID for '{fallback_name}' — "
                 f"cannot apply fallback. Check FALLBACK_REASON_IDS in servicetitan.py")
             return
         try:
             st_client.write_classification(
                 call_id=result.call_id,
-                call_reason_id=follow_up_id,
-                call_reason_name="Follow Up Call",
+                call_reason_id=fallback_id,
+                call_reason_name=fallback_name,
             )
             log(f"  [ok] call {result.call_id}: answered+no-confident-reason → "
-                f"'Follow Up Call' (guaranteed fallback; cleared false Missed Call)")
+                f"'{fallback_name}' (guaranteed fallback; cleared false Missed Call)")
         except Exception as e:
-            log(f"  [error] call {result.call_id}: Follow Up Call fallback write failed: {e}")
+            log(f"  [error] call {result.call_id}: '{fallback_name}' fallback write failed: {e}")
 
 
 def _normalize_job_type(name: str) -> str:

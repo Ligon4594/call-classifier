@@ -47,7 +47,10 @@ ONLY classify as "Missed Call" when ALL of these are true:
   - No named CSR is attributed, AND
   - No Dialpad connection evidence
 
-When in doubt, prefer "Follow Up Call" over "Missed Call". Writing a false Missed Call hides real customer interactions from leadership reports — that is a worse error than over-classifying as Follow Up Call.
+When in doubt, prefer "Follow Up Call" over "Missed Call" — but ONLY if there is transcript evidence of a real conversation. Writing a false Missed Call hides real customer interactions from leadership reports.
+
+CSR-ANSWERED-BUT-NO-CONTEXT RULE (added 2026-07-14 per Taylor):
+If the CSR clearly picked up the phone (answered=true) but there is NO transcript, NO AI recap, and NO other evidence of a real customer conversation, classify as "Wrong Number / Hang Up / Spam" — NOT "Follow Up Call". Rationale from Taylor: "If a CSR picks up the phone and nobody is there, it's a hang up." Follow Up Call is reserved for cases where there is clear evidence of a real conversation about a prior job or estimate.
 
 VERY IMPORTANT — what `should_have_been_booked` means:
 The whole point of this classifier is to surface calls where ServiceTitan's

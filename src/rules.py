@@ -55,33 +55,29 @@ class ClassificationOption:
 
 CALL_REASONS: list[ClassificationOption] = [
     ClassificationOption(
+        name="Avoca",
+        definition=(
+            "Placeholder tag applied to calls handled by the Avoca AI virtual assistant. "
+            "The classifier does NOT re-classify these — Julie manually assigns a real Call "
+            "Reason after reviewing each Avoca-handled call."
+        ),
+        use_when=(
+            "Only when the call was answered by Avoca (agent name = 'Avoca'). Julie replaces "
+            "this with the real Call Reason later. The classifier skips these entirely to "
+            "avoid overwriting Julie's manual work."
+        ),
+        notes="Julie's manual workflow. Never assigned by the AI classifier.",
+        confirmed=True,
+    ),
+    ClassificationOption(
         name="Billing Question",
         definition="Customer is calling to make payment, inquire about or dispute a charge, invoice, or payment.",
         use_when="Caller references an invoice, payment, balance, or billing concern.",
         notes="Do not book a job. Route to office staff.",
         confirmed=True,
     ),
-    ClassificationOption(
-        name="Callback / Recall",
-        definition=(
-            "Customer is calling about an issue related to recent C&R work (within ~45 days). "
-            "This is service-recovery, NOT a new demand opportunity. Per Taylor 2026-05-14: "
-            "a recall is whenever a customer calls in because we had already been to the house "
-            "earlier and something is still wrong or related."
-        ),
-        use_when=(
-            "Within ~45 days of the original job AND the customer connects the current issue to "
-            "the prior visit/work. Common cases: same problem returned, technician install failure, "
-            "issue C&R thought was fixed but isn't, customer dissatisfied with prior diagnosis."
-        ),
-        notes=(
-            "EGIA bucketing: Callback / Recall is EXCLUDED from booking rate (it's service recovery, "
-            "not a new opportunity). Tracked as its own metric so we can monitor service quality. "
-            "Edge case: if the customer says they had a competitor come out and it's now fixed, "
-            "still classify as Callback / Recall for tracking purposes."
-        ),
-        confirmed=True,
-    ),
+    # Callback / Recall REMOVED from CALL_REASONS 2026-07-15 per Taylor: no longer
+    # in ST's master Call Reason list. Still exists as a JOB TYPE (Section 2).
     ClassificationOption(
         name="Cancellation",
         definition="Customer is calling to cancel an existing scheduled appointment or job.",
@@ -118,23 +114,23 @@ CALL_REASONS: list[ClassificationOption] = [
             "Caller needs same-day or next-day service and the call does not result in a booked job. "
             "Also use when the caller is asking about the cost to fix, repair, recharge, or service "
             "their existing system (parts, refrigerant, labor for a repair). "
-            "Do NOT use if they are asking for a quote to replace the whole system — use Estimate Request -- HVAC for that."
+            "Do NOT use if they are asking for a quote to replace the whole system — use Estimate Request-HVAC for that."
         ),
         notes=(
             "Key distinction: Demand = fix/repair the existing system. "
-            "Estimate Request -- HVAC = replace or install a new system."
+            "Estimate Request-HVAC = replace or install a new system."
         ),
         confirmed=False,
     ),
     ClassificationOption(
-        name="Estimate Request -- Duct Cleaning",
+        name="Estimate Request-Duct Cleaning",
         definition="Caller is requesting a quote or estimate specifically for duct cleaning services.",
         use_when="Caller asks about pricing, scheduling, or availability for duct cleaning.",
         notes="May include price shoppers looking for duct cleaning prices.",
         confirmed=False,
     ),
     ClassificationOption(
-        name="Estimate Request -- HVAC",
+        name="Estimate Request-HVAC",
         definition=(
             "Caller is requesting a quote or estimate specifically for a full HVAC system replacement "
             "or brand-new system installation — NOT for repairs, parts, or refrigerant on an existing system."
@@ -145,7 +141,7 @@ CALL_REASONS: list[ClassificationOption] = [
             "Do NOT use if the caller is asking about the cost to repair or service their existing unit — use Demand for that."
         ),
         notes=(
-            "Key distinction: Estimate Request -- HVAC = new system or full replacement. "
+            "Key distinction: Estimate Request-HVAC = new system or full replacement. "
             "Demand = repair, part, refrigerant, or service call on the existing system."
         ),
         confirmed=False,
@@ -194,13 +190,9 @@ CALL_REASONS: list[ClassificationOption] = [
         notes="Refer out if possible. Do not book a job.",
         confirmed=True,
     ),
-    ClassificationOption(
-        name="Supply House Order",
-        definition="Call is from or related to a parts or supply order from a vendor or supply house.",
-        use_when="Caller is a vendor, supplier, or the call relates to a parts order.",
-        notes="Route to operations or purchasing.",
-        confirmed=False,
-    ),
+    # Supply House Order REMOVED 2026-07-15 per Taylor: no longer in ST's master
+    # Call Reason list. If a supply house call comes in, it now falls under
+    # Vendor / Marketing or Contractor Contact depending on context.
     ClassificationOption(
         name="Vendor / Marketing",
         definition="Call is from a vendor, salesperson, or marketing representative.",
