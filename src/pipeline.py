@@ -5,6 +5,10 @@ For a given date range:
   1. Pull all calls from ServiceTitan (paginated)
   2. Pull all Dialpad calls in the same window (for batch linking)
   3. Link each ST call to its Dialpad match (phone + timestamp)
+  3c. Separately link Avoca-handled calls (agent name = "Avoca" — no Dialpad
+      record exists) and map Avoca's own call_reason enum directly to an
+      approved ST Call Reason via avoca_mapping.py — no Claude, no transcript
+      (Avoca's /transcript endpoint is broken; see avoca_mapping.py header)
   4. Classify each linked call via Claude Haiku
   5. Optionally write classifications back to ServiceTitan
   6. Return results for the reporter
@@ -20,9 +24,10 @@ import time
 from datetime import date, datetime, timedelta, timezone
 from typing import Iterable, Optional
 
+from .avoca_mapping import AVOCA_CALL_REASON_MAP, map_avoca_call_reason
 from .classifier import Classifier
 from .dialpad import DialpadClient
-from .linker import link_batch
+from .linker import link_avoca_batch, link_batch
 from .models import Classification, JobTypeMismatch, LinkedCall, ServiceTitanCall
 from .servicetitan import ServiceTitanClient
 
@@ -43,7 +48,12 @@ def run_pipeline(
 
     Args:
         start_date: First day to pull calls from (inclusive).
-        end_date: Last day (exclusive).
+        end_date: Last day (INCLUSIVE — Step 1 compensates with +1 day because
+                  ServiceTitan's createdBefore is exclusive). Any new time
+                  window built inside this pipeline must cover the same span
+                  (end_date + 1 day) or it silently drops the final day — AND
+                  must be clamped to now() if the API rejects future
+                  timestamps (Dialpad does; Avoca doesn't).
         st_client: Authenticated ServiceTitan client.
         dp_client: Authenticated Dialpad client.
         classifier: Claude-backed classifier (or dry_run mode).
@@ -75,18 +85,6 @@ def run_pipeline(
     stats["total_st_calls"] = len(st_calls)
     log(f"  Got {len(st_calls)} calls from ServiceTitan.")
 
-    # Filter out Avoca-handled calls — Avoca transcripts are not accessible via
-    # Dialpad, so the classifier has no content to work with. Leave these calls
-    # unclassified in ServiceTitan until Avoca API access is available.
-    avoca_before = len(st_calls)
-    st_calls = [
-        c for c in st_calls
-        if (c.agent_name or "").strip().lower() != "avoca"
-    ]
-    avoca_skipped = avoca_before - len(st_calls)
-    if avoca_skipped:
-        log(f"  Skipped {avoca_skipped} Avoca-handled call(s) (no transcript access).")
-
     # Optionally filter out calls that already have a classification.
     # Exception: always re-process calls labeled "Missed Call" — ServiceTitan
     # stamps this label natively on any "Abandoned" call, even if someone
@@ -106,11 +104,49 @@ def run_pipeline(
         log("  No calls to process. Done.")
         return [], stats
 
+    # Split out Avoca-handled calls (agent name = "Avoca") for separate
+    # handling (added 2026-08-04). These have no Dialpad record, and Avoca's
+    # /transcript endpoint is broken (404 for most calls), so they are NOT
+    # classified via Claude — Avoca's own call_reason enum is mapped
+    # deterministically to an approved ST Call Reason in Step 3c below.
+    avoca_st_calls = [c for c in st_calls if (c.agent_name or "").strip().lower() == "avoca"]
+    st_calls = [c for c in st_calls if (c.agent_name or "").strip().lower() != "avoca"]
+    if avoca_st_calls:
+        log(f"  {len(avoca_st_calls)} call(s) handled by Avoca AI — will classify directly via Avoca API (Step 3c).")
+
+    # Load ServiceTitan's call reason list once, up front — needed by both
+    # the Avoca direct-mapping step (3c) and the generic Claude write-back
+    # step (5).
+    reason_name_to_id: dict[str, int] = {}
+    if write_back:
+        try:
+            st_reasons = st_client.get_call_reasons()
+            reason_name_to_id = {
+                _normalize_reason_name(r.get("name", "")): r["id"]
+                for r in st_reasons
+                if r.get("name") and r.get("id")
+            }
+            log(f"  Loaded {len(reason_name_to_id)} call reasons from ServiceTitan for ID mapping.")
+        except Exception as e:
+            log(f"  Warning: couldn't load call reasons from ServiceTitan — will use memo only. ({e})")
+
     # ---- Step 2: Pull Dialpad calls in the same window (for batch linking) ----
     log("Step 2: Pulling Dialpad calls for linking...")
     # Expand the window by 5 minutes on each side to catch edge cases.
+    #
+    # IMPORTANT (fixed 2026-08-10): end_date is INCLUSIVE — Step 1 pulls
+    # ServiceTitan through `end_date + 1 day`, so every call that happens ON
+    # end_date is in scope. This window has to cover the same span or the
+    # entire final day of ST calls arrives with no transcript source and
+    # silently falls through to fallback classification. Previously this
+    # ended at end_date MIDNIGHT, which dropped ~12% of a 7-day run.
     dp_start = datetime.combine(start_date, datetime.min.time(), tzinfo=timezone.utc) - timedelta(minutes=5)
-    dp_end = datetime.combine(end_date, datetime.min.time(), tzinfo=timezone.utc) + timedelta(minutes=5)
+    dp_end = datetime.combine(end_date + timedelta(days=1), datetime.min.time(), tzinfo=timezone.utc) + timedelta(minutes=5)
+    # Dialpad 400s on any window reaching into the future ("Timestamp range
+    # cannot be in the future"). end_date is normally today — it's what
+    # --days N and the Railway cron produce — so the +1 day above would trip
+    # it on every run. Calls that haven't happened yet can't be matched anyway.
+    dp_end = min(dp_end, datetime.now(timezone.utc) - timedelta(minutes=1))
     dp_calls = dp_client.get_calls_in_window(start=dp_start, end=dp_end)
     log(f"  Got {len(dp_calls)} calls from Dialpad.")
 
@@ -141,6 +177,130 @@ def run_pipeline(
                     log(f"    Warning: couldn't enrich call {lc.dialpad.call_id}: {e}")
         log(f"  Enriched {enriched} calls with recaps.")
 
+    # ---- Step 3c: Classify Avoca-handled calls directly from Avoca's own data ----
+    # Avoca's call_reason enum (e.g. "BOOKED_REPAIR", "UNBOOKED_TIME_CONCERN")
+    # reliably says what a call was about, but Avoca's /transcript endpoint
+    # returns 404 "Transcript not available" for the large majority of calls
+    # — even ones with a full transcript visible in Avoca's own dashboard
+    # (confirmed 2026-08-10, reported to Avoca as a platform bug). Rather than
+    # depend on that broken endpoint, Avoca calls skip Claude entirely and are
+    # deterministically mapped via avoca_mapping.py, which — per the
+    # 2026-06-05 governance rule — only ever produces values that already
+    # exist in ServiceTitan's approved Call Reason list. See avoca_mapping.py
+    # for the full table and the reasoning behind each bucket (confirmed with
+    # Taylor 2026-08-10).
+    avoca_classifications: list[Classification] = []
+    if avoca_st_calls:
+        log(f"Step 3c: Classifying {len(avoca_st_calls)} Avoca-handled call(s) directly from Avoca's own data...")
+        try:
+            from .avoca import AvocaClient
+            avoca_client = AvocaClient()
+        except Exception as e:
+            log(f"  Avoca API not configured ({e})")
+            log(f"  Leaving {len(avoca_st_calls)} Avoca-handled call(s) unclassified this run.")
+            avoca_client = None
+
+        if avoca_client:
+            try:
+                # Same inclusive-end_date fix as the Dialpad window in Step 2 —
+                # see the comment there. Ending at end_date midnight meant every
+                # Avoca call on the final day was invisible, so those ST calls
+                # fell back to the "Avoca" placeholder instead of a real reason.
+                # Unlike Dialpad, Avoca ACCEPTS a future end_date (verified live
+                # 2026-08-10) — do not clamp this to now(), it would just
+                # re-narrow the window for no reason.
+                av_start = datetime.combine(start_date, datetime.min.time(), tzinfo=timezone.utc) - timedelta(minutes=5)
+                av_end = datetime.combine(end_date + timedelta(days=1), datetime.min.time(), tzinfo=timezone.utc) + timedelta(minutes=5)
+                avoca_calls = avoca_client.get_calls_in_window(start=av_start, end=av_end)
+                log(f"  Got {len(avoca_calls)} calls from Avoca.")
+
+                # Prefers exact ServiceTitan Job ID matching (certain) over
+                # phone+timestamp fuzzy matching (best-effort) — see
+                # linker.link_avoca_batch.
+                avoca_linked = link_avoca_batch(avoca_st_calls, avoca_calls, window_seconds=180)
+                av_matched = sum(1 for lc in avoca_linked if lc.dialpad is not None)
+                av_exact = sum(1 for lc in avoca_linked if lc.match_method == "avoca_job_id_exact")
+                log(f"  {av_matched}/{len(avoca_linked)} Avoca-handled calls matched to Avoca records "
+                    f"({av_exact} by exact ServiceTitan Job ID, {av_matched - av_exact} by phone+timestamp).")
+                stats["matched_dialpad"] += av_matched
+
+                avoca_booked_skipped = 0
+                mapped_tally: dict[str, int] = {}
+                # Raw Avoca call_reason values we saw that are NOT in the
+                # mapping table — governance rule #3 (2026-08-10): surface
+                # these to Taylor, never guess a bucket. They still fall back
+                # to the "Avoca" placeholder for Julie in the meantime.
+                unmapped_tally: dict[str, int] = {}
+                written_av = 0
+
+                for lc in avoca_linked:
+                    st_call = lc.servicetitan
+
+                    # Booked calls: ServiceTitan already has the real job type
+                    # from the booking itself. Nothing to classify or write —
+                    # never touch a call that already has a job.
+                    if st_call.job_id:
+                        avoca_booked_skipped += 1
+                        continue
+
+                    raw_reason = None
+                    if lc.dialpad is not None:
+                        raw_reason = (getattr(lc.dialpad, "raw", None) or {}).get("call", {}).get("call_reason")
+                    mapped_reason = map_avoca_call_reason(raw_reason)
+                    mapped_tally[mapped_reason] = mapped_tally.get(mapped_reason, 0) + 1
+                    if raw_reason and raw_reason.strip().upper() not in AVOCA_CALL_REASON_MAP:
+                        key = raw_reason.strip().upper()
+                        unmapped_tally[key] = unmapped_tally.get(key, 0) + 1
+
+                    classification = Classification(
+                        call_id=st_call.call_id,
+                        classification_type="call_reason",
+                        classification_value=mapped_reason,
+                        confidence=0.95 if raw_reason else 0.3,
+                        should_have_been_booked=False,
+                        booking_recommendation=None,
+                        reasoning=(
+                            f"Avoca's own call_reason '{raw_reason}' mapped directly to "
+                            f"'{mapped_reason}' via avoca_mapping.py — no transcript needed."
+                            if raw_reason else
+                            "No Avoca record matched this call — defaulted to 'Avoca' "
+                            "placeholder for manual review."
+                        ),
+                        classified_at=datetime.now(timezone.utc),
+                        classifier_version="avoca-direct-map-v1",
+                    )
+                    avoca_classifications.append(classification)
+
+                    if write_back:
+                        cr_id = reason_name_to_id.get(_normalize_reason_name(mapped_reason))
+                        if cr_id is None:
+                            log(f"  [skip] call {st_call.call_id}: '{mapped_reason}' has no matching ST reason ID")
+                            continue
+                        try:
+                            st_client.write_classification(
+                                call_id=st_call.call_id,
+                                call_reason_id=cr_id,
+                                call_reason_name=mapped_reason,
+                            )
+                            written_av += 1
+                            log(f"  [ok] call {st_call.call_id}: Avoca '{raw_reason}' → '{mapped_reason}' (id={cr_id})")
+                        except Exception as e:
+                            log(f"  [error] call {st_call.call_id}: {e}")
+
+                log(f"  {avoca_booked_skipped} Avoca call(s) already booked — skipped "
+                    f"(ST job type already correct, nothing to write).")
+                log(f"  Mapped Avoca call reasons: {mapped_tally}")
+                if unmapped_tally:
+                    log(f"  ⚠ UNMAPPED Avoca call_reason values (ask Taylor before mapping — "
+                        f"governance #3): {unmapped_tally}")
+                if write_back:
+                    log(f"  Wrote {written_av} Avoca-derived Call Reason field(s) back to ServiceTitan.")
+                    stats["written_back"] += written_av
+                    stats["reason_field_updated"] += written_av
+            except Exception as e:
+                log(f"  Avoca API error: {e}")
+                log(f"  Leaving {len(avoca_st_calls)} Avoca-handled call(s) unclassified this run.")
+
     # ---- Step 4: Classify each call ----
     log(f"Step 4: Classifying {len(linked)} calls via Claude...")
     classifications: list[Classification] = []
@@ -162,20 +322,8 @@ def run_pipeline(
     # ---- Step 5: Write back to ServiceTitan (if enabled) ----
     if write_back:
         log("Step 5: Writing classifications back to ServiceTitan...")
-
-        # Fetch ServiceTitan's call reason list so we can set the actual
-        # Call Reason field (not just the memo) when the name matches.
-        reason_name_to_id: dict[str, int] = {}
-        try:
-            st_reasons = st_client.get_call_reasons()
-            reason_name_to_id = {
-                _normalize_reason_name(r.get("name", "")): r["id"]
-                for r in st_reasons
-                if r.get("name") and r.get("id")
-            }
-            log(f"  Loaded {len(reason_name_to_id)} call reasons from ServiceTitan for ID mapping.")
-        except Exception as e:
-            log(f"  Warning: couldn't load call reasons from ServiceTitan — will use memo only. ({e})")
+        # reason_name_to_id was already loaded once, early (before Step 2),
+        # so both this step and Step 3c's Avoca direct-mapping share it.
 
         # Build lookup maps for write-back decisions.
         call_type_map: dict[str, str] = {
@@ -334,13 +482,20 @@ def run_pipeline(
                 except Exception as e:
                     log(f"  [error] call {result.call_id}: {e}")
 
-        stats["written_back"] = written
-        stats["reason_field_updated"] = written  # Every successful write updates the reason field
+        stats["written_back"] += written
+        stats["reason_field_updated"] += written  # Every successful write updates the reason field
         log(f"  Wrote {written} Call Reason fields back to ServiceTitan.")
         if skipped_no_id:
             log(f"  Skipped {skipped_no_id} calls with no matching ST reason ID (check your Call Reasons in ST match the rulebook).")
     else:
         log("Step 5: Write-back disabled (dry run). No changes made to ServiceTitan.")
+
+    # Merge Avoca's directly-mapped classifications (Step 3c) into the main
+    # list now, so they're included in the returned classifications and the
+    # weekly report/summary. Merged after Step 5 (which only processes the
+    # Claude-classified calls) and before Step 6 (whose job-type audit safely
+    # no-ops on call_reason entries).
+    classifications = classifications + avoca_classifications
 
     # ---- Step 6: Audit Job Types on Booked calls ----
     # For every booked call the classifier assigned a job_type to, compare the

@@ -57,16 +57,23 @@ CALL_REASONS: list[ClassificationOption] = [
     ClassificationOption(
         name="Avoca",
         definition=(
-            "Placeholder tag applied to calls handled by the Avoca AI virtual assistant. "
-            "The classifier does NOT re-classify these — Julie manually assigns a real Call "
-            "Reason after reviewing each Avoca-handled call."
+            "Last-resort fallback tag for calls handled by the Avoca AI virtual assistant "
+            "when no transcript could be retrieved from the Avoca API (API error, transcript "
+            "not yet processed, etc.). As of 2026-08-04, Avoca calls WITH a retrievable "
+            "transcript are classified normally into a real Call Reason or Job Type — this "
+            "tag is no longer the default outcome for Avoca-handled calls."
         ),
         use_when=(
-            "Only when the call was answered by Avoca (agent name = 'Avoca'). Julie replaces "
-            "this with the real Call Reason later. The classifier skips these entirely to "
-            "avoid overwriting Julie's manual work."
+            "Only when the call was answered by Avoca (agent name = 'Avoca') AND the Avoca "
+            "API transcript fetch failed or returned empty. If a transcript IS available, "
+            "classify the call the same way you would any other call — pick the real Call "
+            "Reason or Job Type it describes, not this placeholder."
         ),
-        notes="Julie's manual workflow. Never assigned by the AI classifier.",
+        notes=(
+            "Julie can still manually reclassify any call left tagged 'Avoca' after review. "
+            "Historical calls classified before 2026-08-04 were all tagged this way regardless "
+            "of transcript availability — see project memory for the cutover date."
+        ),
         confirmed=True,
     ),
     ClassificationOption(

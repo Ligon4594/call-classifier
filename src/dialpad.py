@@ -24,6 +24,7 @@ from __future__ import annotations
 import json
 import os
 import re
+import sys
 import urllib.error
 import urllib.parse
 import urllib.request
@@ -176,7 +177,7 @@ class DialpadClient:
         target_id: Optional[int] = None,
         target_type: Optional[str] = None,
         include_anonymized: bool = False,
-        max_pages: int = 50,
+        max_pages: int = 400,
     ) -> list[DialpadCall]:
         """Pull all calls in a time window using the /call list endpoint.
 
@@ -185,12 +186,18 @@ class DialpadClient:
         only needs phone+timestamp matching, so for speed we skip the recap
         fetch in the bulk path and let the pipeline lazily enrich matches.
 
-        Pagination: walks the cursor up to `max_pages` (default 50) to avoid
-        runaway pulls.
+        Pagination: walks the cursor up to `max_pages` to avoid runaway pulls.
+        FIXED 2026-08-10: previously no `limit` param was sent (Dialpad
+        defaults to 25/page) and max_pages was 50, silently capping every
+        pull at exactly 1250 calls — a 7-day window has more than that, so
+        the tail of the range was dropped and those ST calls could never
+        match. Now requests 50/page × 400 pages = 20,000 max, and logs if
+        the cap is ever actually hit rather than truncating silently.
         """
         params: dict[str, Any] = {
             "started_after": _datetime_to_ms(start),
             "started_before": _datetime_to_ms(end),
+            "limit": 50,
             "include_anonymized": "true" if include_anonymized else "false",
         }
         if target_id is not None:
@@ -212,6 +219,12 @@ class DialpadClient:
             cursor = page.get("cursor")
             if not cursor:
                 break
+        else:
+            # Loop exhausted max_pages with a cursor still pending — the pull
+            # is truncated. Say so loudly instead of silently dropping calls.
+            print(f"  Warning: Dialpad pull hit max_pages={max_pages} with more "
+                  f"results pending — got {len(results)} calls, window truncated.",
+                  file=sys.stderr)
         return results
 
     def find_call_by_phone_and_time(

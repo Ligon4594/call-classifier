@@ -46,7 +46,7 @@ def main():
     parser = argparse.ArgumentParser(description="C&R Call Classifier Pipeline")
     parser.add_argument("--days", type=int, default=7, help="Number of days to look back (default: 7)")
     parser.add_argument("--start", type=str, help="Start date (YYYY-MM-DD)")
-    parser.add_argument("--end", type=str, help="End date (YYYY-MM-DD, exclusive)")
+    parser.add_argument("--end", type=str, help="End date (YYYY-MM-DD, inclusive)")
     parser.add_argument("--write-back", action="store_true", help="Write classifications to ServiceTitan")
     parser.add_argument("--send-email", action="store_true", help="Send the report via SMTP")
     parser.add_argument("--dry-run", action="store_true", help="Print prompts instead of calling Claude")

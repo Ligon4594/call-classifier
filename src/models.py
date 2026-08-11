@@ -53,11 +53,36 @@ class DialpadCall:
 
 
 @dataclass
+class AvocaCall:
+    """A call record from Avoca (AI virtual receptionist) with transcript.
+
+    Deliberately mirrors DialpadCall's field shape (call_id, external_number,
+    internal_user, started_at, duration_seconds, connected_seconds, transcript,
+    recap, action_items, moments, raw) so it's a drop-in for linker.link_batch()
+    and Classifier.classify(), both of which duck-type on these attributes
+    rather than checking isinstance. See src/avoca.py.
+    """
+
+    call_id: str                    # Avoca call UUID
+    external_number: str            # The customer's number
+    internal_user: str              # "Avoca AI" — Avoca doesn't expose which human (if any) it warm-transferred to
+    started_at: datetime
+    duration_seconds: int
+    connected_seconds: int          # Avoca's AI engages the instant it picks up, so this equals duration_seconds
+    transcript: Optional[str]       # Flattened "Avoca AI: ... / Customer: ..." text (fetched separately per call)
+    recap: Optional[str]            # ai_summary if the team's column allowlist exposes it, else synthesized from call_reason + call_outcome + booking_result
+    action_items: list[str]         # Always [] — not exposed by the Avoca API
+    moments: dict                   # Always {} — kept for interface parity with DialpadCall
+    service_titan_job_id: Optional[int] = None  # If the team exposes service_titan_job_id, this is an exact-match linking key — see linker.link_avoca_by_job_id
+    raw: dict = field(default_factory=dict)
+
+
+@dataclass
 class LinkedCall:
-    """A ServiceTitan call joined to its corresponding Dialpad call."""
+    """A ServiceTitan call joined to its corresponding Dialpad (or Avoca) call."""
 
     servicetitan: ServiceTitanCall
-    dialpad: Optional[DialpadCall]   # None if no match found
+    dialpad: Optional[DialpadCall]   # None if no match found. May hold an AvocaCall for Avoca-handled ST calls — same duck-typed interface.
     match_confidence: float          # 0.0 to 1.0 — how confident the linker is
     match_method: str                # "phone+timestamp_exact", "phone+timestamp_window", "no_match", etc.
 

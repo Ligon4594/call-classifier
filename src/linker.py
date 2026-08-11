@@ -70,6 +70,56 @@ def link_call(
     return _pick_best_match(st_call, matches, window_seconds)
 
 
+def link_avoca_batch(
+    st_calls: list[ServiceTitanCall],
+    avoca_calls: list,
+    *,
+    window_seconds: int = 180,
+) -> list[LinkedCall]:
+    """Match Avoca-handled ST calls to Avoca API calls, preferring an exact
+    ServiceTitan Job ID match over phone+timestamp fuzzy matching.
+
+    Avoca can optionally expose `service_titan_job_id` on each call record
+    (team column-allowlist dependent — see AvocaCall.service_titan_job_id).
+    When both sides have a job_id and they match, that's a certain match —
+    no ambiguity possible, unlike phone+time windows where two calls from
+    the same number close together could be confused. ST calls that don't
+    have a job_id yet (not booked at call time) or whose Avoca record lacks
+    service_titan_job_id fall through to the existing phone+timestamp logic.
+    """
+    # Index Avoca calls by ST job_id, for the ones that have it.
+    avoca_by_job_id: dict[int, object] = {
+        av.service_titan_job_id: av
+        for av in avoca_calls
+        if getattr(av, "service_titan_job_id", None)
+    }
+
+    exact_matched: list[LinkedCall] = []
+    remaining_st_calls: list[ServiceTitanCall] = []
+    matched_avoca_ids: set[str] = set()
+
+    for st_call in st_calls:
+        av = avoca_by_job_id.get(st_call.job_id) if st_call.job_id else None
+        if av is not None:
+            exact_matched.append(LinkedCall(
+                servicetitan=st_call,
+                dialpad=av,
+                match_confidence=1.0,
+                match_method="avoca_job_id_exact",
+            ))
+            matched_avoca_ids.add(av.call_id)
+        else:
+            remaining_st_calls.append(st_call)
+
+    # Fuzzy-match everything else by phone+timestamp, same as Dialpad.
+    # Exclude Avoca calls already claimed by an exact job_id match so they
+    # can't also be picked up as a fuzzy match for a different ST call.
+    remaining_avoca_calls = [av for av in avoca_calls if av.call_id not in matched_avoca_ids]
+    fuzzy_matched = link_batch(remaining_st_calls, remaining_avoca_calls, window_seconds=window_seconds)
+
+    return exact_matched + fuzzy_matched
+
+
 def link_batch(
     st_calls: list[ServiceTitanCall],
     dp_calls: list[DialpadCall],
