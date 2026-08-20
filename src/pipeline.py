@@ -86,15 +86,25 @@ def run_pipeline(
     log(f"  Got {len(st_calls)} calls from ServiceTitan.")
 
     # Optionally filter out calls that already have a classification.
-    # Exception: always re-process calls labeled "Missed Call" — ServiceTitan
-    # stamps this label natively on any "Abandoned" call, even if someone
-    # actually answered. The classifier will correct these when it runs.
+    # Exceptions — always re-process calls labeled:
+    #   - "Missed Call": ServiceTitan stamps this natively on any "Abandoned"
+    #     call, even if someone actually answered. The classifier corrects these.
+    #   - "Avoca" (added 2026-08-19): this is the manual-review PLACEHOLDER, not
+    #     a real classification. Old code blanket-tagged Avoca-handled calls with
+    #     it; Step 3c can now often upgrade them to a real reason from Avoca's
+    #     call_reason enum. Re-processing is safe and idempotent: ambiguous enums
+    #     map back to "Avoca" (no-op), and anything Julie manually reclassified
+    #     no longer says "Avoca", so her work is never touched. Without this,
+    #     placeholder-tagged calls were filtered out BEFORE the Avoca split and
+    #     could never be upgraded except via --no-skip (which re-runs every call
+    #     through Claude and risks overwriting manual fixes).
     if skip_already_classified:
         before = len(st_calls)
+        _reprocess_labels = {"missed call", "avoca"}
         st_calls = [
             c for c in st_calls
-            if not c.reason_name                                      # unclassified
-            or (c.reason_name or "").strip().lower() == "missed call" # or wrongly labeled
+            if not c.reason_name                                             # unclassified
+            or (c.reason_name or "").strip().lower() in _reprocess_labels    # or placeholder/wrong
         ]
         skipped = before - len(st_calls)
         if skipped:
