@@ -62,6 +62,16 @@ FALLBACK_REASON_IDS: dict[str, int] = {
     "Follow Up Call": 69,
     # Wrong Number / Hang Up / Spam — used to short-circuit answered+short calls.
     "Wrong Number / Hang Up / Spam": 58528297,
+    # Avoca — the manual-review PLACEHOLDER for Avoca-handled calls whose
+    # call_reason enum is intentionally ambiguous (see avoca_mapping.py).
+    # MUST be hardcoded: it can never be discovered by the history scrape.
+    # The scrape pages OLDEST-FIRST, so its page cap only reaches late-2025
+    # calls, while every "Avoca"-tagged call was written in Aug 2026 — a
+    # chicken-and-egg trap where the reason can't be written because no call
+    # uses it, and no call can use it because it can't be written. That cost
+    # ~11 calls per run, all of them the ones meant for Julie's review queue.
+    # ID read from ServiceTitan Settings → Call Reasons → Edit URL, 2026-08-20.
+    "Avoca": 57955881,
 }
 
 
