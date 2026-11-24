@@ -25,6 +25,52 @@ from .prompts import (
 CLASSIFIER_VERSION = "v0.1-claude-haiku-4.5"
 DEFAULT_MODEL = "claude-haiku-4-5-20251001"
 
+# C&R normal business hours, Central time. Anything outside this is "after
+# hours" for the purpose of the HVAC AHR/WKD DEMAND job type (see rules.py).
+BUSINESS_HOURS_START = 8   # 8:00 AM
+BUSINESS_HOURS_END = 17    # 5:00 PM
+
+
+def to_central(dt: datetime) -> datetime:
+    """Convert a ServiceTitan UTC timestamp to Central time.
+
+    ServiceTitan's `receivedOn` is UTC. Every business rule Taylor cares about
+    (after hours, weekend) is expressed in Central, so the classifier must be
+    handed local time or it will misjudge roughly a third of evening calls.
+
+    Uses zoneinfo when the tz database is available. Railway's python:3.11-slim
+    image often ships WITHOUT tzdata, which raises ZoneInfoNotFoundError — so
+    we fall back to a fixed UTC-5 (CDT). That fallback is off by one hour from
+    Nov-Mar (CST), which is acceptable here: an hour of drift only matters for
+    calls within 60 minutes of the 8am/5pm boundary, and cooling-season demand
+    work (when this job type actually gets used) is all CDT anyway.
+    """
+    if dt.tzinfo is None:
+        dt = dt.replace(tzinfo=timezone.utc)
+    try:
+        from zoneinfo import ZoneInfo
+        return dt.astimezone(ZoneInfo("America/Chicago"))
+    except Exception:
+        from datetime import timedelta
+        return dt.astimezone(timezone(timedelta(hours=-5)))
+
+
+def describe_call_timing(dt: datetime) -> str:
+    """Render a call's timestamp as a plain-language Central-time description.
+
+    Fed straight into the prompt so the model never has to do timezone math.
+    """
+    c = to_central(dt)
+    is_weekend = c.weekday() >= 5
+    in_hours = (not is_weekend) and BUSINESS_HOURS_START <= c.hour < BUSINESS_HOURS_END
+    if is_weekend:
+        window = "WEEKEND"
+    elif in_hours:
+        window = "during normal business hours (Mon-Fri 8:00 AM - 5:00 PM Central)"
+    else:
+        window = "AFTER HOURS (outside Mon-Fri 8:00 AM - 5:00 PM Central)"
+    return f"{c:%A, %B %d %Y at %I:%M %p} Central — {window}"
+
 
 class Classifier:
     """Wrapper around the Anthropic API for call classification.
@@ -57,7 +103,10 @@ class Classifier:
                 raise RuntimeError(
                     "anthropic SDK not installed. Run: pip install anthropic"
                 ) from e
-            self._client = Anthropic(api_key=self._api_key)
+            # 2026-11-24: explicit timeout + retries. The SDK default (10 min,
+            # 2 retries) let one stalled request hang a November dry run for
+            # 20+ minutes; on Railway that would stall the Monday cron too.
+            self._client = Anthropic(api_key=self._api_key, timeout=90.0, max_retries=3)
 
     def classify(
         self,
@@ -96,6 +145,7 @@ class Classifier:
         prompt = build_classification_prompt(
             caller_phone=st_call.caller_phone,
             call_started_at=st_call.received_at.isoformat(),
+            call_timing=describe_call_timing(st_call.received_at),
             duration_seconds=st_call.duration_seconds,
             csr_name=csr_name,
             servicetitan_label=servicetitan_label,

@@ -24,12 +24,43 @@ import time
 from datetime import date, datetime, timedelta, timezone
 from typing import Iterable, Optional
 
-from .avoca_mapping import AVOCA_CALL_REASON_MAP, map_avoca_call_reason
+from .avoca_mapping import (
+    AVOCA_CALL_REASON_MAP,
+    AVOCA_UNMAPPED_FALLBACK,
+    map_avoca_call_reason,
+)
 from .classifier import Classifier
 from .dialpad import DialpadClient
-from .linker import link_avoca_batch, link_batch
+from .linker import _customer_phone, link_avoca_batch, link_batch
 from .models import Classification, JobTypeMismatch, LinkedCall, ServiceTitanCall
+from .rules import ALL_CALL_REASON_NAMES
 from .servicetitan import ServiceTitanClient
+from .short_call import (
+    SHORT_CALL_REASON,
+    SHORT_CALL_SECONDS,
+    SHORT_CALL_VERSION,
+    is_overwritable,
+    short_call_verdict,
+)
+
+# Escalated (evidence-based) Avoca classifications must clear this bar before
+# they are written (10/16 audit recommendation; was 0.5).
+AVOCA_ESCALATION_MIN_CONFIDENCE = 0.7
+
+
+def _short_call_classification(st_call, why: str) -> Classification:
+    return Classification(
+        call_id=st_call.call_id,
+        classification_type="call_reason",
+        classification_value=SHORT_CALL_REASON,
+        confidence=0.95,
+        should_have_been_booked=False,
+        booking_recommendation=None,
+        reasoning=(f"Short-call rule (Taylor 2026-11-24): under {SHORT_CALL_SECONDS}s and "
+                   f"never became a conversation ({why}). Excluded from booking rate."),
+        classified_at=datetime.now(timezone.utc),
+        classifier_version=SHORT_CALL_VERSION,
+    )
 
 
 def run_pipeline(
@@ -75,6 +106,11 @@ def run_pipeline(
         "matched_dialpad": 0,
         "written_back": 0,
         "reason_field_updated": 0,
+        "short_call_rule": 0,
+        "short_call_written": 0,
+        "short_call_protected": 0,
+        "avoca_tx_tries": 0,
+        "avoca_tx_hits": 0,
     }
 
     # ---- Step 1: Pull all ServiceTitan calls in the date range ----
@@ -167,6 +203,28 @@ def run_pipeline(
     stats["matched_dialpad"] = matched
     log(f"  {matched}/{len(linked)} calls matched to Dialpad records.")
 
+    # ---- Step 3a: Short-call rule (Taylor 2026-11-24) ----
+    # Inbound + unbooked + under 10s + no conversation on the linked Dialpad
+    # record -> "Wrong Number / Hang Up / Spam" deterministically (no Claude).
+    # See src/short_call.py for the guard rails.
+    short_classifications: list[Classification] = []
+    _remaining = []
+    for lc in linked:
+        ok, why = short_call_verdict(lc.servicetitan, [lc.dialpad])
+        if ok:
+            if is_overwritable(lc.servicetitan):
+                short_classifications.append(_short_call_classification(lc.servicetitan, why))
+                continue
+            stats["short_call_protected"] += 1
+            log(f"  [protected] call {lc.servicetitan.call_id}: short call but current reason "
+                f"'{lc.servicetitan.reason_name}' may be a manual fix - not touched.")
+            continue
+        _remaining.append(lc)
+    linked = _remaining
+    stats["short_call_rule"] += len(short_classifications)
+    log(f"Step 3a: Short-call rule -> {len(short_classifications)} call(s) set to "
+        f"'{SHORT_CALL_REASON}' (inbound, unbooked, <{SHORT_CALL_SECONDS}s, no conversation).")
+
     # ---- Step 3b: Enrich matched calls with full Dialpad recaps ----
     if enrich_recaps and matched > 0:
         log("Step 3b: Fetching AI Recaps for matched calls...")
@@ -228,13 +286,55 @@ def run_pipeline(
                 # phone+timestamp fuzzy matching (best-effort) — see
                 # linker.link_avoca_batch.
                 avoca_linked = link_avoca_batch(avoca_st_calls, avoca_calls, window_seconds=180)
+
+                # ── Second-pass matching (added 2026-09-01 per Taylor) ────
+                # Avoca's created_at is stamped at call END and the start time
+                # is reconstructed as created_at - duration (see avoca.py), so
+                # the timestamp can drift well past the strict 180s window —
+                # especially on long calls. Every unmatched call here lands on
+                # the "Avoca" placeholder, so before accepting that, re-match
+                # just the leftovers with a 15-minute window. Phone number
+                # still has to match exactly; only the time tolerance widens.
+                _unmatched = [lc.servicetitan for lc in avoca_linked if lc.dialpad is None]
+                if _unmatched:
+                    _retry = {
+                        lc2.servicetitan.call_id: lc2
+                        for lc2 in link_avoca_batch(_unmatched, avoca_calls, window_seconds=900)
+                        if lc2.dialpad is not None
+                    }
+                    if _retry:
+                        log(f"  Second-pass match (15-min window): rescued "
+                            f"{len(_retry)} of {len(_unmatched)} unmatched Avoca calls.")
+                        avoca_linked = [
+                            _retry.get(lc.servicetitan.call_id, lc) for lc in avoca_linked
+                        ]
+
                 av_matched = sum(1 for lc in avoca_linked if lc.dialpad is not None)
                 av_exact = sum(1 for lc in avoca_linked if lc.match_method == "avoca_job_id_exact")
                 log(f"  {av_matched}/{len(avoca_linked)} Avoca-handled calls matched to Avoca records "
                     f"({av_exact} by exact ServiceTitan Job ID, {av_matched - av_exact} by phone+timestamp).")
                 stats["matched_dialpad"] += av_matched
 
+                # ── Dialpad fallback index for Avoca calls ────────────────
+                # Avoca-handled ST calls are split out at Step 1 and never see
+                # Steps 2/3/3b, so their Dialpad records were pulled but never
+                # consulted. For the calls that are about to land on the
+                # "Avoca" placeholder that's a waste: Dialpad often has a full
+                # recap/transcript for the very same call. Build the index
+                # once here (pure in-memory join, no extra API cost) and use
+                # it as an evidence source in the escalation path below.
+                avoca_dp_index = {
+                    lc.servicetitan.call_id: lc.dialpad
+                    for lc in link_batch(avoca_st_calls, dp_calls, window_seconds=120)
+                    if lc.dialpad is not None
+                }
+
                 avoca_booked_skipped = 0
+                escalated_ok = 0
+                escalated_failed = 0
+                dp_enriched_for_avoca = 0
+                tx_tries = 0      # Avoca /transcript attempts (telemetry —
+                tx_hits = 0       # tells us if Avoca fixed their 404 bug)
                 mapped_tally: dict[str, int] = {}
                 # Raw Avoca call_reason values we saw that are NOT in the
                 # mapping table — governance rule #3 (2026-08-10): surface
@@ -249,36 +349,211 @@ def run_pipeline(
                     # Booked calls: ServiceTitan already has the real job type
                     # from the booking itself. Nothing to classify or write —
                     # never touch a call that already has a job.
-                    if st_call.job_id:
+                    if st_call.job_id or (st_call.call_type or "").strip().lower() == "booked":
                         avoca_booked_skipped += 1
+                        continue
+
+                    # Pull Avoca's transcript for every matched, unbooked call
+                    # (fixed 2026-11-24: the endpoint works again, the parser
+                    # was reading the old response shape). Used as evidence
+                    # for the escalation path and for the short-call rule.
+                    if lc.dialpad is not None and not lc.dialpad.transcript:
+                        tx_tries += 1
+                        try:
+                            _tx = avoca_client.get_call_transcript(lc.dialpad.call_id)
+                            if _tx:
+                                lc.dialpad.transcript = _tx
+                                tx_hits += 1
+                        except Exception as e:
+                            log(f"  [avoca-transcript-error] call {st_call.call_id}: {e}")
+
+                    # Short-call rule applies to Avoca-handled calls too, but
+                    # only if Avoca's own record (and any Dialpad record) is
+                    # also short with no conversation.
+                    _ok, _why = short_call_verdict(
+                        st_call, [lc.dialpad, avoca_dp_index.get(st_call.call_id)])
+                    if _ok:
+                        if not is_overwritable(st_call):
+                            stats["short_call_protected"] += 1
+                            continue
+                        _sc = _short_call_classification(st_call, _why)
+                        avoca_classifications.append(_sc)
+                        stats["short_call_rule"] += 1
+                        mapped_tally[SHORT_CALL_REASON] = mapped_tally.get(SHORT_CALL_REASON, 0) + 1
+                        if write_back:
+                            cr_id = reason_name_to_id.get(_normalize_reason_name(SHORT_CALL_REASON))
+                            if cr_id is None:
+                                log(f"  [skip] call {st_call.call_id}: '{SHORT_CALL_REASON}' has no matching ST reason ID")
+                                continue
+                            try:
+                                st_client.write_classification(
+                                    call_id=st_call.call_id,
+                                    call_reason_id=cr_id,
+                                    call_reason_name=SHORT_CALL_REASON,
+                                )
+                                written_av += 1
+                                stats["short_call_written"] += 1
+                                log(f"  [ok] call {st_call.call_id}: Avoca short call → '{SHORT_CALL_REASON}' (id={cr_id})")
+                            except Exception as e:
+                                log(f"  [error] call {st_call.call_id}: {e}")
                         continue
 
                     raw_reason = None
                     if lc.dialpad is not None:
                         raw_reason = (getattr(lc.dialpad, "raw", None) or {}).get("call", {}).get("call_reason")
                     mapped_reason = map_avoca_call_reason(raw_reason)
-                    mapped_tally[mapped_reason] = mapped_tally.get(mapped_reason, 0) + 1
                     if raw_reason and raw_reason.strip().upper() not in AVOCA_CALL_REASON_MAP:
                         key = raw_reason.strip().upper()
                         unmapped_tally[key] = unmapped_tally.get(key, 0) + 1
 
-                    classification = Classification(
-                        call_id=st_call.call_id,
-                        classification_type="call_reason",
-                        classification_value=mapped_reason,
-                        confidence=0.95 if raw_reason else 0.3,
-                        should_have_been_booked=False,
-                        booking_recommendation=None,
-                        reasoning=(
-                            f"Avoca's own call_reason '{raw_reason}' mapped directly to "
-                            f"'{mapped_reason}' via avoca_mapping.py — no transcript needed."
-                            if raw_reason else
-                            "No Avoca record matched this call — defaulted to 'Avoca' "
-                            "placeholder for manual review."
-                        ),
-                        classified_at=datetime.now(timezone.utc),
-                        classifier_version="avoca-direct-map-v1",
-                    )
+                    classification = None
+
+                    # ── ESCALATION (added 2026-08-26 per Taylor) ──────────
+                    # "It's just showing a call reason as Avoca, and that's
+                    # not what I want. We need it to have an actual reason."
+                    #
+                    # The direct map intentionally sends three groups to the
+                    # "Avoca" placeholder: ambiguous enums
+                    # (EXCUSED_TRANSFER_TO_SPECIFIC_PERSON,
+                    # EXCUSED_OTHER_QUESTIONS, ...), brand-new unmapped enums,
+                    # and calls with no Avoca record at all. In the August
+                    # backfill that was 21 of 35 Avoca writes (60%) — all of
+                    # them landing on a label that tells Taylor nothing.
+                    #
+                    # The placeholder is no longer terminal. Before settling
+                    # for it, gather whatever evidence exists and let Claude
+                    # classify the call like any other. Evidence, best first:
+                    #   1. Avoca's own transcript (often 404s — that's fine)
+                    #   2. Avoca's ai_summary recap (already on the record)
+                    #   3. The Dialpad record for the same call
+                    # Governance is unchanged: Claude picks only from the
+                    # approved rulebook in rules.py, so this can still never
+                    # invent a Call Reason. If Claude can't do better than the
+                    # placeholder, we keep the placeholder.
+                    if mapped_reason == AVOCA_UNMAPPED_FALLBACK:
+                        evidence = lc.dialpad          # the AvocaCall, if matched
+                        evidence_source = "avoca-recap" if evidence else None
+
+                        # 0. No Avoca record matched even after the wide
+                        #    second pass? Last resort (added 2026-09-01 per
+                        #    Taylor): ask Avoca directly by phone number.
+                        #    Only trust the result if it's the SAME call —
+                        #    within 6 hours of the ST timestamp — otherwise a
+                        #    customer's later call would contaminate this one.
+                        if evidence is None and _customer_phone(st_call):
+                            try:
+                                byphone = avoca_client.find_latest_call_by_phone(
+                                    _customer_phone(st_call))
+                                if byphone is not None and abs(
+                                    (byphone.started_at - st_call.received_at).total_seconds()
+                                ) <= 6 * 3600:
+                                    evidence = byphone
+                                    evidence_source = "avoca-by-phone"
+                                    raw_reason = (byphone.raw or {}).get(
+                                        "call", {}).get("call_reason") or raw_reason
+                            except Exception:
+                                pass
+
+                        # 1. Try Avoca's transcript endpoint. Known to 404 for
+                        #    most calls (Avoca platform bug, reported
+                        #    2026-08-10) — treat failure as normal, not error.
+                        #    Tried on EVERY escalated call so the hit-rate
+                        #    telemetry below tells us if Avoca fixed the bug.
+                        if evidence is not None and evidence.transcript:
+                            evidence_source = "avoca-transcript"
+                        # Matched records already had their transcript pulled
+                        # above; only a by-phone record still needs one.
+                        if (evidence is not None and not evidence.transcript
+                                and evidence_source == "avoca-by-phone"):
+                            tx_tries += 1
+                            try:
+                                tx = avoca_client.get_call_transcript(evidence.call_id)
+                                if tx:
+                                    evidence.transcript = tx
+                                    evidence_source = "avoca-transcript"
+                                    tx_hits += 1
+                            except Exception:
+                                pass
+
+                        # 2. Fall back to Dialpad's record of the same call.
+                        #    Richer than Avoca's enum in practice, and we
+                        #    already paid to pull it in Step 2.
+                        if evidence is None or not (evidence.recap or evidence.transcript):
+                            dp_alt = avoca_dp_index.get(st_call.call_id)
+                            if dp_alt is not None:
+                                if not (dp_alt.recap or dp_alt.transcript):
+                                    try:
+                                        full = dp_client.get_call(dp_alt.call_id)
+                                        dp_alt.recap = full.recap
+                                        dp_alt.action_items = full.action_items
+                                        dp_alt.transcript = full.transcript
+                                        dp_enriched_for_avoca += 1
+                                        if dp_enriched_for_avoca % 9 == 0:
+                                            time.sleep(6)   # Dialpad /call/{id} = 10/min
+                                    except Exception:
+                                        pass
+                                if dp_alt.recap or dp_alt.transcript:
+                                    evidence = dp_alt
+                                    evidence_source = "dialpad"
+
+                        if evidence is not None and (evidence.recap or evidence.transcript):
+                            try:
+                                guess = classifier.classify(
+                                    st_call, evidence, force_call_reason=True,
+                                )
+                                if (
+                                    guess.classification_type == "call_reason"
+                                    and guess.classification_value != AVOCA_UNMAPPED_FALLBACK
+                                    and guess.confidence >= AVOCA_ESCALATION_MIN_CONFIDENCE
+                                    # Governance backstop (2026-06-05 rule): the
+                                    # escalated value must already exist in ST's
+                                    # master Call Reason list. Also what keeps
+                                    # dry-run's stub value from being treated as
+                                    # a real classification.
+                                    and guess.classification_value in ALL_CALL_REASON_NAMES
+                                ):
+                                    classification = guess
+                                    classification.classifier_version = (
+                                        f"avoca-escalated-{evidence_source}-v1"
+                                    )
+                                    mapped_reason = guess.classification_value
+                                    escalated_ok += 1
+                                    log(f"  [escalated] call {st_call.call_id}: "
+                                        f"Avoca '{raw_reason}' was ambiguous → "
+                                        f"'{mapped_reason}' from {evidence_source} "
+                                        f"({guess.confidence:.0%})")
+                                else:
+                                    escalated_failed += 1
+                                    log(f"  [escalate-low] call {st_call.call_id}: evidence from "
+                                        f"{evidence_source} but Claude gave '{guess.classification_value}' "
+                                        f"({guess.confidence:.0%}) - below bar, kept placeholder")
+                            except Exception as e:
+                                escalated_failed += 1
+                                log(f"  [escalate-error] call {st_call.call_id}: {e}")
+                        else:
+                            escalated_failed += 1
+
+                    mapped_tally[mapped_reason] = mapped_tally.get(mapped_reason, 0) + 1
+
+                    if classification is None:
+                        classification = Classification(
+                            call_id=st_call.call_id,
+                            classification_type="call_reason",
+                            classification_value=mapped_reason,
+                            confidence=0.95 if raw_reason else 0.3,
+                            should_have_been_booked=False,
+                            booking_recommendation=None,
+                            reasoning=(
+                                f"Avoca's own call_reason '{raw_reason}' mapped directly to "
+                                f"'{mapped_reason}' via avoca_mapping.py — no transcript needed."
+                                if raw_reason else
+                                "No Avoca record matched this call, and no Avoca transcript or "
+                                "Dialpad recap was available to classify from — defaulted to "
+                                "'Avoca' placeholder for manual review."
+                            ),
+                            classified_at=datetime.now(timezone.utc),
+                            classifier_version="avoca-direct-map-v1",
+                        )
                     avoca_classifications.append(classification)
 
                     if write_back:
@@ -299,10 +574,29 @@ def run_pipeline(
 
                 log(f"  {avoca_booked_skipped} Avoca call(s) already booked — skipped "
                     f"(ST job type already correct, nothing to write).")
+                if tx_tries:
+                    log(f"  Avoca /transcript hit rate: {tx_hits}/{tx_tries}. "
+                        + ("Their 404 bug looks FIXED — transcripts are the best "
+                           "evidence, tell Claude." if tx_hits > tx_tries // 2 else
+                           "Endpoint still mostly 404s (Avoca platform bug, "
+                           "reported 2026-08-10) — recaps/Dialpad used instead."))
+                if escalated_ok or escalated_failed:
+                    total_esc = escalated_ok + escalated_failed
+                    log(f"  Escalated {total_esc} ambiguous Avoca call(s) to Claude: "
+                        f"{escalated_ok} resolved to a real reason, "
+                        f"{escalated_failed} had no usable evidence and stay on the "
+                        f"'Avoca' placeholder for Julie.")
                 log(f"  Mapped Avoca call reasons: {mapped_tally}")
+                still_placeholder = mapped_tally.get(AVOCA_UNMAPPED_FALLBACK, 0)
+                if still_placeholder:
+                    log(f"  NOTE: {still_placeholder} call(s) still tagged 'Avoca'. These had "
+                        f"no Avoca transcript, no Avoca summary, and no Dialpad recap — "
+                        f"there is nothing to classify from. Julie reviews these manually.")
                 if unmapped_tally:
                     log(f"  ⚠ UNMAPPED Avoca call_reason values (ask Taylor before mapping — "
                         f"governance #3): {unmapped_tally}")
+                stats["avoca_tx_tries"] += tx_tries
+                stats["avoca_tx_hits"] += tx_hits
                 if write_back:
                     log(f"  Wrote {written_av} Avoca-derived Call Reason field(s) back to ServiceTitan.")
                     stats["written_back"] += written_av
@@ -348,6 +642,27 @@ def run_pipeline(
 
         written = 0
         skipped_no_id = 0
+
+        # Short-call rule writes (Step 3a). Already filtered to inbound,
+        # unbooked, overwritable calls.
+        if short_classifications:
+            sc_id = reason_name_to_id.get(_normalize_reason_name(SHORT_CALL_REASON))
+            if sc_id is None:
+                log(f"  [skip] short-call rule: no ST reason ID for '{SHORT_CALL_REASON}' - nothing written")
+            else:
+                for sc in short_classifications:
+                    try:
+                        st_client.write_classification(
+                            call_id=sc.call_id,
+                            call_reason_id=sc_id,
+                            call_reason_name=SHORT_CALL_REASON,
+                        )
+                        written += 1
+                        stats["short_call_written"] += 1
+                        log(f"  [ok] call {sc.call_id}: short call → '{SHORT_CALL_REASON}' (id={sc_id})")
+                    except Exception as e:
+                        log(f"  [error] call {sc.call_id}: {e}")
+
         for result in classifications:
             current_call_type = call_type_map.get(result.call_id, "")
 
@@ -362,6 +677,13 @@ def run_pipeline(
                 # This catches edge cases — Avoca calls, short abandoned calls —
                 # that have less context and legitimately score 0.5–0.69.
                 if result.confidence < 0.5:
+                    continue
+
+                # "Avoca" is a manual-review placeholder for Avoca-handled
+                # calls only - never accept it from Claude for a normal call
+                # (10/16 audit: call 63954366).
+                if _normalize_reason_name(result.classification_value) == "avoca":
+                    log(f"  [skip] call {result.call_id}: Claude returned the 'Avoca' placeholder - not written")
                     continue
 
                 # ----- ANSWERED-CALL GUARD on the call_reason write path -----
@@ -505,7 +827,7 @@ def run_pipeline(
     # weekly report/summary. Merged after Step 5 (which only processes the
     # Claude-classified calls) and before Step 6 (whose job-type audit safely
     # no-ops on call_reason entries).
-    classifications = classifications + avoca_classifications
+    classifications = classifications + short_classifications + avoca_classifications
 
     # ---- Step 6: Audit Job Types on Booked calls ----
     # For every booked call the classifier assigned a job_type to, compare the
@@ -528,6 +850,8 @@ def run_pipeline(
         predicted_norm = _normalize_job_type(result.classification_value)
         if actual_norm == predicted_norm:
             continue  # Match — all good
+        if _ahr_demand_equivalent(actual_norm, predicted_norm):
+            continue  # After-hours demand — see helper. Not a real disagreement.
         mismatches.append(JobTypeMismatch(
             call_id=result.call_id,
             job_number=st_call.job_number,
@@ -711,6 +1035,41 @@ def _handle_answered_missed_call(
                 f"'{fallback_name}' (guaranteed fallback; cleared false Missed Call)")
         except Exception as e:
             log(f"  [error] call {result.call_id}: '{fallback_name}' fallback write failed: {e}")
+
+
+# Normalized names of the demand/service job types that ServiceTitan rolls up
+# into "HVAC AHR/WKD DEMAND" when the tech goes out after hours or on a weekend.
+_DEMAND_SERVICE_JOB_TYPES = {
+    "hvacahrwkddemand",
+    "hvacnocool",
+    "hvacnoheat",
+    "hvacotherissue",
+}
+_AHR_DEMAND_NORM = "hvacahrwkddemand"
+
+
+def _ahr_demand_equivalent(actual_norm: str, predicted_norm: str) -> bool:
+    """Suppress the false 'mismatch' between AHR/WKD DEMAND and the underlying issue.
+
+    Per Taylor (2026-08-20): any demand/service visit that lands after hours or
+    on a weekend is booked as "HVAC AHR/WKD DEMAND" regardless of whether the
+    actual problem is no cool, no heat, or something else — "it's a demand every
+    time for that." So when ServiceTitan says AHR/WKD DEMAND and the classifier
+    says HVAC No Cool, the two agree about the work; they just disagree about
+    which label to show. That is not worth Taylor's review time — it was 20 of
+    the 33 mismatches (61%) in the August 2026 backfill.
+
+    Deliberately NARROW: this only suppresses the flag when the prediction is
+    itself demand/service work. If ServiceTitan says AHR/WKD DEMAND and the
+    classifier says HVAC Estimate, Maintenance, Replacement, or Warranty, that
+    is a genuine disagreement and still gets flagged.
+
+    rules.py + the system prompt now teach the model to predict AHR/WKD DEMAND
+    directly; this is the backstop for when it doesn't.
+    """
+    if actual_norm != _AHR_DEMAND_NORM:
+        return False
+    return predicted_norm in _DEMAND_SERVICE_JOB_TYPES
 
 
 def _normalize_job_type(name: str) -> str:

@@ -61,7 +61,15 @@ FALLBACK_REASON_IDS: dict[str, int] = {
     # confidently re-classify — must always be present in the reason map.
     "Follow Up Call": 69,
     # Wrong Number / Hang Up / Spam — used to short-circuit answered+short calls.
-    "Wrong Number / Hang Up / Spam": 58528297,
+    # Corrected 58528297 -> 70 on 2026-08-20. ServiceTitan returns this reason
+    # as id=70 (name "Wrong Number/Hang Up/Spam", no spaces around the slashes),
+    # and 79 successful write-backs across the August backfill logs confirm 70
+    # is the live ID. 58528297 appears nowhere in ST responses and was never
+    # written to even once — the history scrape always found 70 first and won.
+    # It was a latent trap, not a live data split: if a run's lookback window
+    # had ever contained zero spam calls, discovery would have missed 70 and
+    # the fallback would have written the phantom ID instead.
+    "Wrong Number / Hang Up / Spam": 70,
     # Avoca — the manual-review PLACEHOLDER for Avoca-handled calls whose
     # call_reason enum is intentionally ambiguous (see avoca_mapping.py).
     # MUST be hardcoded: it can never be discovered by the history scrape.
@@ -434,9 +442,16 @@ class ServiceTitanClient:
         # added. This handles the chicken-and-egg case where a reason (e.g.
         # "Missed Call") has never been written back so it never appears in
         # call history.
+        # 2026-11-24: skip a fallback when the live data already has a reason
+        # with the same (normalized) name. ST now returns the spam reason as
+        # id 58528297 "Wrong Number / Hang Up / Spam" on every call (Aug-Nov),
+        # including calls originally written with id 70; appending the
+        # hardcoded 70 after it made name->id resolution prefer the stale id.
+        def _n(x: str) -> str:
+            return " ".join(x.lower().replace(" / ", "/").split())
+        live_names = {_n(n) for n in seen.values()}
         for rname, rid in FALLBACK_REASON_IDS.items():
-            # Only add if we don't already have this name from a live source
-            if rid not in seen:
+            if rid not in seen and _n(rname) not in live_names:
                 seen[rid] = rname
 
         return [{"id": rid, "name": rname} for rid, rname in seen.items()]

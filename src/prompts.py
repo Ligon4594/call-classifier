@@ -52,6 +52,17 @@ When in doubt, prefer "Follow Up Call" over "Missed Call" — but ONLY if there 
 CSR-ANSWERED-BUT-NO-CONTEXT RULE (added 2026-07-14 per Taylor):
 If the CSR clearly picked up the phone (answered=true) but there is NO transcript, NO AI recap, and NO other evidence of a real customer conversation, classify as "Wrong Number / Hang Up / Spam" — NOT "Follow Up Call". Rationale from Taylor: "If a CSR picks up the phone and nobody is there, it's a hang up." Follow Up Call is reserved for cases where there is clear evidence of a real conversation about a prior job or estimate.
 
+AFTER-HOURS / WEEKEND DEMAND — JOB TYPE RULE (added 2026-08-20 per Taylor):
+If a job WAS booked and the work is demand/service work on an existing system, check the timing BEFORE picking between "HVAC No Cool", "HVAC No Heat", and "HVAC Other Issue". If the technician is going out after hours or on a weekend, the job type is "HVAC AHR/WKD DEMAND" — every time, regardless of whether the problem is no cool, no heat, or something else. Taylor's words: "it always falls in the demand... it's a demand every time for that."
+
+Two signals, either one is enough:
+  (a) The "Local time" line in the Call Metadata says WEEKEND or AFTER HOURS.
+  (b) The conversation shows the visit itself is after hours or on a weekend — an evening or same-night arrival window, a Saturday/Sunday appointment, or an overtime/after-hours fee (C&R charges $225 after hours vs $99 during normal hours).
+
+Signal (b) matters even when the call came in during business hours: a 4:00 PM call that books a 6:00 PM arrival is still HVAC AHR/WKD DEMAND.
+
+This rule applies ONLY to demand/service work. After-hours calls that book an estimate, maintenance/tune-up, install/replacement, warranty, or callback keep their own job type — timing does not change those. And it is a JOB TYPE only: an after-hours demand call that does NOT book stays "Demand" as a Call Reason.
+
 VERY IMPORTANT — what `should_have_been_booked` means:
 The whole point of this classifier is to surface calls where ServiceTitan's
 own label is wrong. ServiceTitan calls are tagged things like "Abandoned",
@@ -105,7 +116,11 @@ def build_rulebook() -> str:
     return (
         "# C&R Services Call Classification Rulebook\n\n"
         "A call has EITHER a Call Reason (no job booked) OR a Job Type (job booked). Never both.\n\n"
-        + _format_options(CALL_REASONS, "SECTION 1: Call Reasons (no job booked)")
+        # "Avoca" is a manual-review placeholder, not a classification - never
+        # offer it to the model (10/16 audit). It stays in rules.py because
+        # it exists in ServiceTitan's master list.
+        + _format_options([o for o in CALL_REASONS if o.name != "Avoca"],
+                          "SECTION 1: Call Reasons (no job booked)")
         + "\n"
         + _format_options(JOB_TYPES, "SECTION 2: Job Types (job booked)")
     )
@@ -116,6 +131,7 @@ def build_classification_prompt(
     caller_phone: str,
     call_started_at: str,
     duration_seconds: int,
+    call_timing: str = "",
     csr_name: str,
     servicetitan_label: str,
     recap: str,
@@ -162,7 +178,8 @@ the best matching Call Reason from the rulebook.
 
 ## Call Metadata
 - Caller phone: {caller_phone}
-- Started at: {call_started_at}
+- Started at (UTC): {call_started_at}
+- Local time: {call_timing or "(not available)"}
 - Duration: {duration_seconds} seconds
 - Handled by (C&R CSR): {csr_name}
 - ServiceTitan's own label for this call: "{servicetitan_label}"

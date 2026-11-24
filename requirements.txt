@@ -2,3 +2,4 @@
 # Only two external packages. Everything else uses Python stdlib.
 anthropic>=0.40.0       # Claude API SDK (classification engine)
 python-dotenv>=1.0.0    # .env file loading (local dev only; Railway injects env vars)
+tzdata>=2024.1         # zoneinfo data for America/Chicago on python:3.11-slim (DST-correct)
