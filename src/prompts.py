@@ -116,7 +116,11 @@ def build_rulebook() -> str:
     return (
         "# C&R Services Call Classification Rulebook\n\n"
         "A call has EITHER a Call Reason (no job booked) OR a Job Type (job booked). Never both.\n\n"
-        + _format_options(CALL_REASONS, "SECTION 1: Call Reasons (no job booked)")
+        # "Avoca" is a manual-review placeholder, not a classification - never
+        # offer it to the model (10/16 audit). It stays in rules.py because
+        # it exists in ServiceTitan's master list.
+        + _format_options([o for o in CALL_REASONS if o.name != "Avoca"],
+                          "SECTION 1: Call Reasons (no job booked)")
         + "\n"
         + _format_options(JOB_TYPES, "SECTION 2: Job Types (job booked)")
     )

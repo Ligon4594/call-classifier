@@ -167,23 +167,33 @@ class AvocaClient:
         offset = 0
         results: list[AvocaCall] = []
         pages_fetched = 0
+        cursor: Optional[str] = None
+        seen_ids: set[str] = set()
         while pages_fetched < max_pages:
-            page = self._get(
-                "/api/calls",
-                params={
-                    "start_date": _iso(start),
-                    "end_date": _iso(end),
-                    "limit": limit,
-                    "offset": offset,
-                },
-            )
+            params = {
+                "start_date": _iso(start),
+                "end_date": _iso(end),
+                "limit": limit,
+            }
+            # 2026-11: Avoca now returns pagination.cursor; prefer it, fall
+            # back to offset paging for older API behaviour.
+            if cursor:
+                params["cursor"] = cursor
+            else:
+                params["offset"] = offset
+            page = self._get("/api/calls", params=params)
             items: list[dict] = page.get("data") or []
             for item in items:
+                cid = str(item.get("call_id") or "")
+                if cid and cid in seen_ids:
+                    continue
+                seen_ids.add(cid)
                 results.append(_build_avoca_call(item))
             pages_fetched += 1
             pagination = page.get("pagination") or {}
-            if not pagination.get("has_more"):
+            if not pagination.get("has_more") or not items:
                 break
+            cursor = pagination.get("cursor") or None
             offset += limit
         return results
 
@@ -196,23 +206,21 @@ class AvocaClient:
         return _build_avoca_call(data)
 
     def get_call_transcript(self, call_id: str) -> Optional[str]:
-        """Fetch a call's transcript and flatten it into readable speaker-tagged text.
+        """Fetch a call's transcript as readable speaker-tagged text.
 
-        Returns None if the call has no transcript (e.g. still processing, or
-        a pre-call transfer where the AI never engaged).
+        FIXED 2026-11-24 (Grok Bot / Call Classifier): Avoca changed the
+        response shape. The endpoint now answers 200 with a TOP-LEVEL body
+        ``{"call_id": ..., "transcript": "<diarized text>", "format": "diarized"}``
+        (no ``data`` wrapper; transcript is a string like
+        ``"bot [00:00]: ...\nuser [00:06]: ..."``). The old parser only read
+        ``data.transcript`` as a list of turns, so every transcript was
+        silently discarded and logged as a miss. Both shapes are handled.
+
+        Returns None if the call has no transcript (still processing, or a
+        pre-call transfer where the AI never engaged). 404 is normal.
         """
         page = self._get(f"/api/calls/{call_id}/transcript")
-        data = page.get("data") or {}
-        turns = data.get("transcript") or []
-        if not turns:
-            return None
-        lines = []
-        for turn in turns:
-            role = "Avoca AI" if turn.get("role") == "assistant" else "Customer"
-            content = (turn.get("content") or "").strip()
-            if content:
-                lines.append(f"{role}: {content}")
-        return "\n".join(lines) if lines else None
+        return _flatten_transcript(page)
 
     def find_latest_call_by_phone(self, phone: str) -> Optional[AvocaCall]:
         """Get the most recent Avoca call for a phone number. Useful for spot-checks."""
@@ -301,21 +309,19 @@ def _build_avoca_call(call_json: dict) -> AvocaCall:
     # context than the raw enum-style call_reason/call_outcome values (e.g.
     # "EXCUSED_RETURNING_CALL"). Fall back to synthesizing one from whatever
     # enum fields ARE present if ai_summary isn't in the allowlist.
-    ai_summary = (call_json.get("ai_summary") or "").strip()
-    if ai_summary:
-        recap = ai_summary
-    else:
-        call_reason = call_json.get("call_reason") or ""
-        call_outcome = call_json.get("call_outcome") or ""
-        booking_result = call_json.get("booking_result") or ""
-        recap_parts = [
-            p for p in (
-                f"Avoca call reason: {call_reason}." if call_reason else "",
-                f"Avoca outcome: {call_outcome}." if call_outcome else "",
-                f"Avoca booking result: {booking_result}." if booking_result else "",
-            ) if p
-        ]
-        recap = " ".join(recap_parts) if recap_parts else None
+    # FIXED 2026-11-24: ai_summary is now sometimes a DICT
+    # ({customer_intent, transfer_reason, key_details, conversation_status,
+    # next_action, ...}) instead of a string. The old ``.strip()`` raised
+    # "'dict' object has no attribute 'strip'", which aborted Step 3c for the
+    # WHOLE run and left every Avoca call unclassified (seen in the
+    # 2026-11-23 Railway run).
+    #
+    # Also fixed: when there is no real summary we no longer synthesize a fake
+    # "recap" from the enum ("Avoca call reason: X."). That string was never
+    # empty, so it masqueraded as evidence and blocked the Dialpad/transcript
+    # fallbacks (10/16 audit). The enum is still on raw["call"]["call_reason"]
+    # for the deterministic mapping in avoca_mapping.py.
+    recap = _summary_text(call_json.get("ai_summary")) or None
 
     # ServiceTitan Job ID — when the team's column allowlist exposes this,
     # it's an exact match key back to ServiceTitanCall.job_id, more reliable
@@ -340,3 +346,59 @@ def _build_avoca_call(call_json: dict) -> AvocaCall:
         service_titan_job_id=st_job_id,
         raw={"call": call_json},
     )
+
+
+def _summary_text(value: Any) -> str:
+    """Render Avoca's ai_summary (string, dict, or list) as plain text."""
+    if value is None:
+        return ""
+    if isinstance(value, str):
+        return value.strip()
+    if isinstance(value, dict):
+        parts = []
+        for k, v in value.items():
+            t = _summary_text(v)
+            if t:
+                parts.append(f"{k.replace('_', ' ')}: {t}")
+        return "; ".join(parts)
+    if isinstance(value, (list, tuple)):
+        return "; ".join(t for t in (_summary_text(v) for v in value) if t)
+    return str(value).strip()
+
+
+def _flatten_transcript(page: Any) -> Optional[str]:
+    """Normalize every transcript response shape Avoca has used into text.
+
+    Shapes seen:
+      2026-11: {"call_id", "transcript": "bot [00:00]: ...\nuser [..]: ...", "format": "diarized"}
+      2026-08 (documented): {"data": {"transcript": [{"role", "content"}, ...]}}
+    """
+    if not page or not isinstance(page, dict):
+        return None
+    container = page.get("data") if isinstance(page.get("data"), dict) else page
+    tx = container.get("transcript")
+    if tx is None and isinstance(page.get("transcript"), (str, list)):
+        tx = page.get("transcript")
+    if isinstance(tx, str):
+        text = tx.strip()
+        if not text:
+            return None
+        # Relabel diarized speaker tags so the classifier reads them plainly.
+        text = re.sub(r"(?m)^bot(\s*\[)", r"Avoca AI\1", text)
+        text = re.sub(r"(?m)^user(\s*\[)", r"Customer\1", text)
+        return text
+    if isinstance(tx, list):
+        lines = []
+        for turn in tx:
+            if isinstance(turn, str):
+                if turn.strip():
+                    lines.append(turn.strip())
+                continue
+            if not isinstance(turn, dict):
+                continue
+            role = "Avoca AI" if turn.get("role") in ("assistant", "bot", "agent") else "Customer"
+            content = _summary_text(turn.get("content") or turn.get("text"))
+            if content:
+                lines.append(f"{role}: {content}")
+        return "\n".join(lines) if lines else None
+    return None

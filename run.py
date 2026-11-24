@@ -52,6 +52,7 @@ def main():
     parser.add_argument("--dry-run", action="store_true", help="Print prompts instead of calling Claude")
     parser.add_argument("--no-skip", action="store_true", help="Don't skip already-classified calls")
     parser.add_argument("--quiet", action="store_true", help="Suppress progress output")
+    parser.add_argument("--json-out", type=str, help="Also write classifications + stats to this JSON file (audit trail)")
     args = parser.parse_args()
 
     # Date range
@@ -83,6 +84,24 @@ def main():
         skip_already_classified=not args.no_skip,
         verbose=not args.quiet,
     )
+
+    print(f"  Short-call rule: {pipeline_stats.get('short_call_rule', 0)} matched, "
+          f"{pipeline_stats.get('short_call_written', 0)} written, "
+          f"{pipeline_stats.get('short_call_protected', 0)} protected (possible manual fix). "
+          f"Avoca transcripts fetched: {pipeline_stats.get('avoca_tx_hits', 0)}/"
+          f"{pipeline_stats.get('avoca_tx_tries', 0)}", file=sys.stderr)
+    if args.json_out:
+        import json as _json
+        with open(args.json_out, "w") as fh:
+            _json.dump({
+                "start": str(start_date), "end": str(end_date), "write_back": args.write_back,
+                "stats": {k: v for k, v in pipeline_stats.items() if k != "job_type_mismatches"},
+                "classifications": [
+                    {"call_id": c.call_id, "type": c.classification_type, "value": c.classification_value,
+                     "confidence": c.confidence, "version": c.classifier_version}
+                    for c in classifications
+                ],
+            }, fh, indent=1, default=str)
 
     # Generate report
     # NOTE: Using Resend sandbox (onboarding@resend.dev) which can only send

@@ -442,9 +442,16 @@ class ServiceTitanClient:
         # added. This handles the chicken-and-egg case where a reason (e.g.
         # "Missed Call") has never been written back so it never appears in
         # call history.
+        # 2026-11-24: skip a fallback when the live data already has a reason
+        # with the same (normalized) name. ST now returns the spam reason as
+        # id 58528297 "Wrong Number / Hang Up / Spam" on every call (Aug-Nov),
+        # including calls originally written with id 70; appending the
+        # hardcoded 70 after it made name->id resolution prefer the stale id.
+        def _n(x: str) -> str:
+            return " ".join(x.lower().replace(" / ", "/").split())
+        live_names = {_n(n) for n in seen.values()}
         for rname, rid in FALLBACK_REASON_IDS.items():
-            # Only add if we don't already have this name from a live source
-            if rid not in seen:
+            if rid not in seen and _n(rname) not in live_names:
                 seen[rid] = rname
 
         return [{"id": rid, "name": rname} for rid, rname in seen.items()]
