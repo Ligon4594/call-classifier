@@ -253,6 +253,39 @@ JOB_TYPES: list[ClassificationOption] = [
         confirmed=False,
     ),
     ClassificationOption(
+        name="HVAC AHR/WKD DEMAND",
+        definition=(
+            "After-hours / weekend demand service call. Any demand (repair/service) visit on an "
+            "existing HVAC system where the TECHNICIAN GOES OUT outside normal business hours — "
+            "after hours on a weekday, or any time Saturday or Sunday. The nature of the problem "
+            "is irrelevant: no cool, no heat, or any other issue all land here when the timing is "
+            "after hours or weekend."
+        ),
+        use_when=(
+            "A job WAS booked for demand/service work AND either:\n"
+            "      (a) the call itself came in outside Mon-Fri 8:00 AM - 5:00 PM Central, or\n"
+            "      (b) the conversation shows the tech is going out after hours or on a weekend — "
+            "an evening/same-night arrival window, a weekend appointment, or an overtime / "
+            "after-hours diagnostic fee (C&R charges $225 after hours vs $99 during normal hours).\n"
+            "      This job type OVERRIDES HVAC No Cool, HVAC No Heat, and HVAC Other Issue. "
+            "Timing wins over the nature of the problem — if it's demand work and it's after "
+            "hours or a weekend, it is HVAC AHR/WKD DEMAND every time.\n"
+            "      Do NOT use it for after-hours calls that are estimates, maintenance, "
+            "installs, or warranty work — those keep their own job type regardless of timing."
+        ),
+        notes=(
+            "Added 2026-08-20 at Taylor's explicit direction: 'it always falls in the demand... "
+            "it's a demand every time for that.' This job type already existed in ServiceTitan; "
+            "adding it here syncs the mirror, it does not create anything new (see governance "
+            "rule at top of file). NOTE: it is a JOB TYPE only — never a Call Reason. An "
+            "after-hours demand call that does NOT book stays 'Demand' as a Call Reason. "
+            "Validated against 22 real August 2026 bookings: 21 were determined purely by the "
+            "call timestamp; the 1 exception came in at 4:10 PM Central but the tech was "
+            "dispatched 5-7 PM — which is why signal (b) exists."
+        ),
+        confirmed=True,
+    ),
+    ClassificationOption(
         name="HVAC Estimate",
         definition="On-site estimate for HVAC repair, replacement, or new system installation.",
         use_when="Customer requested a quote for HVAC work and an appointment was scheduled.",

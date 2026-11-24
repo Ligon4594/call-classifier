@@ -61,7 +61,15 @@ FALLBACK_REASON_IDS: dict[str, int] = {
     # confidently re-classify — must always be present in the reason map.
     "Follow Up Call": 69,
     # Wrong Number / Hang Up / Spam — used to short-circuit answered+short calls.
-    "Wrong Number / Hang Up / Spam": 58528297,
+    # Corrected 58528297 -> 70 on 2026-08-20. ServiceTitan returns this reason
+    # as id=70 (name "Wrong Number/Hang Up/Spam", no spaces around the slashes),
+    # and 79 successful write-backs across the August backfill logs confirm 70
+    # is the live ID. 58528297 appears nowhere in ST responses and was never
+    # written to even once — the history scrape always found 70 first and won.
+    # It was a latent trap, not a live data split: if a run's lookback window
+    # had ever contained zero spam calls, discovery would have missed 70 and
+    # the fallback would have written the phantom ID instead.
+    "Wrong Number / Hang Up / Spam": 70,
     # Avoca — the manual-review PLACEHOLDER for Avoca-handled calls whose
     # call_reason enum is intentionally ambiguous (see avoca_mapping.py).
     # MUST be hardcoded: it can never be discovered by the history scrape.

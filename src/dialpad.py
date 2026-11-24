@@ -24,7 +24,9 @@ from __future__ import annotations
 import json
 import os
 import re
+import socket
 import sys
+import time
 import urllib.error
 import urllib.parse
 import urllib.request
@@ -49,7 +51,16 @@ DIALPAD_API_BASE = "https://dialpad.com/api/v2"
 # Dialpad enforces 10/min on /call/{id} which is the bottleneck for our pipeline.
 # We'll let the caller handle rate limiting in the pipeline; this client just
 # raises HTTPStatusError on 429 so callers can back off.
-DEFAULT_TIMEOUT_SECONDS = 30.0
+# Raised from 30s on 2026-08-20: a 20-day backfill window makes the /call
+# list endpoint noticeably slower to first byte, and a single 30s timeout
+# was killing the whole run ~25 minutes in (socket.timeout out of _get).
+DEFAULT_TIMEOUT_SECONDS = 60.0
+
+# Transient failures (read timeout, connection reset, 429, 5xx) are retried
+# with exponential backoff rather than aborting the run. Long backfills make
+# a one-off blip almost certain; without this, one bad page throws away
+# everything done so far.
+RETRY_BACKOFF_SECONDS = (2, 5, 15)  # 4 attempts total
 
 
 class DialpadAPIError(RuntimeError):
@@ -112,24 +123,53 @@ class DialpadClient:
             },
             method="GET",
         )
-        try:
-            with urllib.request.urlopen(req, timeout=self.timeout) as resp:
-                body = resp.read()
-                if not body:
-                    return {}
-                return json.loads(body.decode("utf-8"))
-        except urllib.error.HTTPError as exc:
-            if exc.code == 404:
-                return {}
+        # Retry transient failures with exponential backoff. A permanent
+        # error (401 auth, 404, 400 bad params) is raised immediately —
+        # retrying those just wastes time and hides the real problem.
+        attempts = len(RETRY_BACKOFF_SECONDS) + 1
+        for attempt in range(attempts):
             try:
-                detail = exc.read().decode("utf-8", errors="replace")[:500]
-            except Exception:
-                detail = ""
-            raise DialpadAPIError(
-                f"Dialpad API error {exc.code} on GET {path}: {detail}"
-            ) from exc
-        except urllib.error.URLError as exc:
-            raise DialpadAPIError(f"Dialpad API connection error on GET {path}: {exc}") from exc
+                with urllib.request.urlopen(req, timeout=self.timeout) as resp:
+                    body = resp.read()
+                    if not body:
+                        return {}
+                    return json.loads(body.decode("utf-8"))
+
+            except urllib.error.HTTPError as exc:
+                if exc.code == 404:
+                    return {}
+                # 429 (rate limited) and 5xx (server-side) are worth retrying.
+                transient = exc.code == 429 or 500 <= exc.code < 600
+                if transient and attempt < attempts - 1:
+                    wait = RETRY_BACKOFF_SECONDS[attempt]
+                    print(f"  Dialpad HTTP {exc.code} on {path} — retrying in {wait}s "
+                          f"(attempt {attempt + 2}/{attempts})...", file=sys.stderr)
+                    time.sleep(wait)
+                    continue
+                try:
+                    detail = exc.read().decode("utf-8", errors="replace")[:500]
+                except Exception:
+                    detail = ""
+                raise DialpadAPIError(
+                    f"Dialpad API error {exc.code} on GET {path}: {detail}"
+                ) from exc
+
+            except (urllib.error.URLError, socket.timeout, TimeoutError, ConnectionError) as exc:
+                # Read timeouts surface as socket.timeout (bare, NOT wrapped in
+                # URLError) — that's what killed the 2026-08-20 August backfill.
+                if attempt < attempts - 1:
+                    wait = RETRY_BACKOFF_SECONDS[attempt]
+                    print(f"  Dialpad connection issue on {path} ({type(exc).__name__}) — "
+                          f"retrying in {wait}s (attempt {attempt + 2}/{attempts})...",
+                          file=sys.stderr)
+                    time.sleep(wait)
+                    continue
+                raise DialpadAPIError(
+                    f"Dialpad API connection error on GET {path} after {attempts} attempts: {exc}"
+                ) from exc
+
+        # Unreachable — the loop either returns or raises.
+        raise DialpadAPIError(f"Dialpad API: exhausted retries on GET {path}")
 
     # ------------------------------------------------------------------
     # PUBLIC INTERFACE — pipeline depends on these signatures.

@@ -37,6 +37,34 @@ Bucket decisions confirmed with Taylor 2026-08-10:
 Any Avoca call_reason NOT in this map (a brand-new enum value Avoca
 introduces later) falls back to "Avoca" — never guess, never invent.
 
+═══════════════════════════════════════════════════════════════════════════
+UPDATE 2026-08-26 — "Avoca" IS NO LONGER A TERMINAL ANSWER
+═══════════════════════════════════════════════════════════════════════════
+Taylor: "It's just showing a call reason as Avoca, and that's not what I
+want. We need it to have an actual reason whenever it's classifying."
+
+In the August 2026 backfill, 21 of 35 Avoca writes (60%) landed on the
+"Avoca" placeholder — a label that tells Taylor nothing. The breakdown:
+  - 8  EXCUSED_TRANSFER_TO_SPECIFIC_PERSON  (mapped here, deliberately)
+  - 3  EXCUSED_OTHER_QUESTIONS              (mapped here, deliberately)
+  - 10 no Avoca record matched the ST call at all
+
+Whenever this module returns AVOCA_UNMAPPED_FALLBACK, pipeline.py Step 3c
+now ESCALATES the call to Claude instead of writing the placeholder. It
+gathers evidence in this order — Avoca transcript, Avoca ai_summary, then
+the Dialpad record for the same call (Avoca-handled calls are split out at
+Step 1 and never saw Steps 2/3, so their Dialpad recaps were being pulled
+and then ignored) — and classifies normally.
+
+This does NOT weaken the governance rule. Claude still picks only from
+CALL_REASONS in rules.py, and Step 3c re-validates the answer against
+ALL_CALL_REASON_NAMES before writing. A call only keeps the "Avoca" label
+when there is genuinely no transcript, no summary, and no recap anywhere —
+i.e. nothing to classify from. Those are the real manual-review cases.
+
+The mappings below are therefore now best read as: "when Avoca's own enum
+is decisive, trust it and skip the LLM." Everything else gets read.
+
 If Taylor needs to change any of these mappings, or Avoca introduces a new
 call_reason value that shows up as "(unmapped -> Avoca)" in a run's log,
 that's a signal to come back and extend this table — always ask before
