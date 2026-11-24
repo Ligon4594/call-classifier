@@ -524,6 +524,9 @@ def run_pipeline(
                                         f"({guess.confidence:.0%})")
                                 else:
                                     escalated_failed += 1
+                                    log(f"  [escalate-low] call {st_call.call_id}: evidence from "
+                                        f"{evidence_source} but Claude gave '{guess.classification_value}' "
+                                        f"({guess.confidence:.0%}) - below bar, kept placeholder")
                             except Exception as e:
                                 escalated_failed += 1
                                 log(f"  [escalate-error] call {st_call.call_id}: {e}")

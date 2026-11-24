@@ -103,7 +103,10 @@ class Classifier:
                 raise RuntimeError(
                     "anthropic SDK not installed. Run: pip install anthropic"
                 ) from e
-            self._client = Anthropic(api_key=self._api_key)
+            # 2026-11-24: explicit timeout + retries. The SDK default (10 min,
+            # 2 retries) let one stalled request hang a November dry run for
+            # 20+ minutes; on Railway that would stall the Monday cron too.
+            self._client = Anthropic(api_key=self._api_key, timeout=90.0, max_retries=3)
 
     def classify(
         self,
